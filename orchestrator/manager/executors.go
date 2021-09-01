@@ -8,13 +8,18 @@ import (
 	"time"
 )
 
+// HeartbeatFrequencySeconds dictates the frequency of expected heartbeats from executors
 const HeartbeatFrequencySeconds = 5
+
+// MaxMissedHeartbeats dictates the maximum number of heartbeats missed before we declare the executor dead
 const MaxMissedHeartbeats = 3
 const heartbeatFailureDuration = HeartbeatFrequencySeconds * MaxMissedHeartbeats * time.Second
 
 var executorMap = make(map[string]*Executor)
 var lock sync.Mutex
 
+// Executor represents a running client process that hosts worker threads. Each Executor can support up to #Workers
+// simultaneously running Jobs.
 type Executor struct {
 	Id            string
 	HeartbeatTime time.Time
@@ -22,6 +27,7 @@ type Executor struct {
 	WorkChan      chan []types.Job
 }
 
+// EligibleExecutors returns an array of Executors that are currently alive and ready to receive work
 func EligibleExecutors() []*Executor {
 	execs := make([]*Executor, 0, len(executorMap))
 	now := time.Now()
@@ -40,12 +46,14 @@ func EligibleExecutors() []*Executor {
 	return execs
 }
 
+// GetExecutor returns an Executor by its id, if it exists. nil is returned otherwise.
 func GetExecutor(id string) *Executor {
 	lock.Lock()
 	defer lock.Unlock()
 	return executorMap[id]
 }
 
+// AddExecutor adds an Executor to the list of Executors to track.
 func AddExecutor(id string, workerCount int) {
 	lock.Lock()
 	defer lock.Unlock()
@@ -58,6 +66,7 @@ func AddExecutor(id string, workerCount int) {
 	logger.Logger.Info("Added executor", executorMap[id])
 }
 
+// RecordHeartbeat records a heartbeat for an executor by its id.
 func RecordHeartbeat(id string) {
 	if e, ok := executorMap[id]; ok {
 		e.HeartbeatTime = time.Now()
