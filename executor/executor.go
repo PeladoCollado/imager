@@ -48,7 +48,7 @@ func main() {
 
 	workerUuid, err :=  uuid.NewRandom()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Unable to generate executor id %w", err)
+		fmt.Fprintf(os.Stderr, "Unable to generate executor id: %v", err)
 		os.Exit(1)
 	}
 	workerId = types.WorkerId{Id: workerUuid.String(), Workers: workers}
@@ -61,7 +61,7 @@ func main() {
 	}
 	resp, err := orchestratorClient.Post(connectUrl, "application/javascript", buffer)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Unable to connect to orchestrator at %s:%p - %v\n", orchestratorHost, port, err)
+		fmt.Fprintf(os.Stderr, "Unable to connect to orchestrator at %s:%d - %v\n", orchestratorHost, port, err)
 		os.Exit(1)
 	}
 	if resp.StatusCode != 200 {
@@ -69,7 +69,7 @@ func main() {
 		if err != nil {
 			errMsg = []byte(fmt.Sprintf("Unable to read error response body - %s", err.Error()))
 		}
-		fmt.Fprintf(os.Stderr, "Unable to connect to orchestrator at %s:%p status code %d- %s\n",
+		fmt.Fprintf(os.Stderr, "Unable to connect to orchestrator at %s:%d status code %d- %s\n",
 			orchestratorHost, port, resp.StatusCode, string(errMsg))
 		os.Exit(1)
 	}
