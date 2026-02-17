@@ -1,114 +1,142 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/PeladoCollado/imager/metrics"
 	"github.com/PeladoCollado/imager/orchestrator/logger"
 	"github.com/PeladoCollado/imager/types"
 	"io"
-	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
 var client http.Client
 
 func RunJob(ctx context.Context, job types.Job, metricsCollector metrics.MetricsCollector) {
-	ctx, cancel := context.WithDeadline(ctx, time.Now().Add(job.Duration))
+	jobDuration := job.Duration()
+	if jobDuration <= 0 {
+		jobDuration = time.Second
+	}
+	if len(job.TargetURLs) == 0 {
+		logger.Logger.Error("Job has no target URLs", job.ID)
+		return
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, jobDuration)
 	defer cancel()
-	reqChan := make(chan *http.Request)
 
-	// big buffered channels so request handlers aren't blocked on metrics publishing
-	respChan := make(chan metrics.SuccessEvent, 1000)
-	errChan := make(chan metrics.ErrorEvent, 1000)
-
-	// Once per second up to the job duration, execute a batch of requests up to job.RatePerSec
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		for {
-			select {
-			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(ctx, time.Second)
-
-				// request handling is single threaded. to increase parallelization, expect num workers to increase
-				go executeRequest(reqChan, errChan, respChan, job.Source, ctx)
-				go generateRequests(job, cancel, reqChan, ctx)
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	for {
+	for idx, requestSpec := range job.Requests {
 		select {
-		case response := <-respChan:
-			metricsCollector.PostSuccess(response)
-		case err := <-errChan:
-			metricsCollector.PostFailure(err)
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			return
+		default:
 		}
+
+		target := job.TargetURLs[idx%len(job.TargetURLs)]
+		executeRequest(runCtx, target, requestSpec, metricsCollector)
 	}
 }
 
-func generateRequests(job types.Job, cancelFn func(), reqChan chan *http.Request, ctx context.Context) {
-	defer cancelFn()
-	for i := 0; i < job.RatePerSec; i++ {
-		req, err := job.Source.Next()
-		if err != nil {
-			logger.Logger.Error("Unable to generate new requests", err)
-			cancelFn()
-			return
-		}
-		select {
-		case reqChan <- req:
-			// great! keep looping
-		case <-ctx.Done():
-			return
-		}
+func executeRequest(ctx context.Context,
+	target string,
+	requestSpec types.RequestSpec,
+	metricsCollector metrics.MetricsCollector) {
+	requestURL, err := buildRequestURL(target, requestSpec.Path, requestSpec.QueryString)
+	if err != nil {
+		metricsCollector.PostFailure(metrics.ErrorEvent{ErrMsg: err.Error()})
+		return
 	}
+
+	method := requestSpec.Method
+	if method == "" {
+		method = http.MethodGet
+	}
+
+	var body io.Reader
+	if requestSpec.Body != "" {
+		body = bytes.NewBufferString(requestSpec.Body)
+	}
+
+	request, err := http.NewRequestWithContext(ctx, method, requestURL, body)
+	if err != nil {
+		metricsCollector.PostFailure(metrics.ErrorEvent{ErrMsg: err.Error()})
+		return
+	}
+	for key, values := range requestSpec.Headers {
+		request.Header[key] = append([]string(nil), values...)
+	}
+
+	start := time.Now()
+	response, err := client.Do(request)
+	firstByteDuration := time.Since(start)
+	if err != nil {
+		metricsCollector.PostFailure(metrics.ErrorEvent{
+			Status:   0,
+			ErrMsg:   err.Error(),
+			Duration: firstByteDuration,
+		})
+		return
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode >= 300 {
+		errMsg := readErrorBody(response.Body)
+		metricsCollector.PostFailure(metrics.ErrorEvent{
+			Status:   response.StatusCode,
+			ErrMsg:   errMsg,
+			Duration: firstByteDuration,
+		})
+		return
+	}
+
+	bytesRead, readErr := io.Copy(io.Discard, response.Body)
+	if readErr != nil {
+		metricsCollector.PostFailure(metrics.ErrorEvent{
+			Status:   response.StatusCode,
+			ErrMsg:   readErr.Error(),
+			Duration: time.Since(start),
+		})
+		return
+	}
+
+	metricsCollector.PostSuccess(metrics.SuccessEvent{
+		Status:        response.StatusCode,
+		ResponseSize:  bytesRead,
+		Duration:      time.Since(start),
+		FirstByteTime: firstByteDuration,
+	})
 }
 
-func executeRequest(reqChan chan *http.Request,
-	errChan chan metrics.ErrorEvent,
-	respChan chan metrics.SuccessEvent,
-	source types.RequestSource,
-	ctx context.Context) {
-
-	for {
-		select {
-		case req := <-reqChan:
-			start := time.Now()
-			response, err := client.Do(req)
-			end := time.Now()
-			fbDuration := end.Sub(start)
-			if err != nil {
-				errChan <- metrics.ErrorEvent{0, err.Error(), fbDuration}
-			} else if response.StatusCode >= 300 {
-				limit := io.LimitReader(response.Body, 3000) // read the error, but limit the size
-				errMsg, err := io.ReadAll(limit)
-				if err != nil {
-					errMsg = []byte(fmt.Sprint("Unable to read error message from response ", err))
-				}
-				errChan <- metrics.ErrorEvent{Status: response.StatusCode,
-					ErrMsg:   string(errMsg),
-					Duration: fbDuration}
-			} else {
-				bytes, err := source.Read(response)
-				if err != nil {
-					log.Println("Unable to read response body ", err)
-					errChan <- metrics.ErrorEvent{ErrMsg: err.Error(), Duration: fbDuration}
-					break
-				}
-				final := time.Now()
-				respChan <- metrics.SuccessEvent{Status: response.StatusCode,
-					ResponseSize:  bytes,
-					Duration:      final.Sub(start),
-					FirstByteTime: fbDuration}
-			}
-		case <-ctx.Done():
-			return
-		}
+func buildRequestURL(targetBaseURL string, path string, query string) (string, error) {
+	baseURL, err := url.Parse(targetBaseURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid target URL %q: %w", targetBaseURL, err)
 	}
+	if !baseURL.IsAbs() {
+		return "", fmt.Errorf("target URL must be absolute: %s", targetBaseURL)
+	}
+
+	relativePath := path
+	if relativePath == "" {
+		relativePath = "/"
+	}
+	relativeURL := &url.URL{Path: relativePath, RawQuery: query}
+	resolved := baseURL.ResolveReference(relativeURL)
+
+	// Avoid accidental double slashes after host while preserving explicit path intent.
+	resolved.Path = strings.ReplaceAll(resolved.Path, "//", "/")
+	return resolved.String(), nil
+}
+
+func readErrorBody(body io.Reader) string {
+	limit := io.LimitReader(body, 3000)
+	bytesRead, err := io.ReadAll(limit)
+	if err != nil {
+		return fmt.Sprintf("Unable to read error message from response %v", err)
+	}
+	return string(bytesRead)
 }

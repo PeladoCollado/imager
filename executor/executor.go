@@ -18,7 +18,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"time"
 )
@@ -36,14 +35,15 @@ var workerId types.WorkerId
 
 func main() {
 	var orchestratorHost string
-	var port, workers int
+	var orchestratorPort int
+	var workers int
+	var metricsPort int
 	flag.StringVar(&orchestratorHost, "host", "imgr-orchestrator",
 		"The hostname of the orchestrator process")
-	flag.IntVar(&port, "port", 8099, "The port of the orchestrator process")
+	flag.IntVar(&orchestratorPort, "port", 8099, "The port of the orchestrator process")
 	flag.IntVar(&workers, "workers", 1, "The number of worker threads to start")
+	flag.IntVar(&metricsPort, "metrics-port", 9100, "The port to expose executor metrics on")
 	flag.Parse()
-	hostString := fmt.Sprintf("%s:%d", orchestratorHost, port)
-	connectUrl := fmt.Sprintf("http://%s/connect", hostString)
 
 	workerUuid, err := uuid.NewRandom()
 	if err != nil {
@@ -51,83 +51,116 @@ func main() {
 		os.Exit(1)
 	}
 	workerId = types.WorkerId{Id: workerUuid.String(), Workers: workers}
-	buffer := bytes.NewBuffer(make([]byte, 0, 1000))
-	jsonEncoder := json.NewEncoder(buffer)
-	err = jsonEncoder.Encode(workerId)
-	if err != nil {
-		logger.Logger.Error("Unable to encode worker as json", err)
+
+	collector := metrics.NewPrometheusMetricsCollector(prometheus.DefaultRegisterer)
+	go serveMetrics(metricsPort)
+
+	hostString := fmt.Sprintf("%s:%d", orchestratorHost, orchestratorPort)
+	connectURL := fmt.Sprintf("http://%s/connect", hostString)
+	heartbeatURL := fmt.Sprintf("http://%s/heartbeat", hostString)
+	nextURL := fmt.Sprintf("http://%s/next", hostString)
+
+	if err := connect(connectURL, workerId); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	resp, err := orchestratorClient.Post(connectUrl, "application/javascript", buffer)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Unable to connect to orchestrator at %s:%d - %v\n", orchestratorHost, port, err)
-		os.Exit(1)
-	}
-	if resp.StatusCode != 200 {
-		errMsg, err := io.ReadAll(io.LimitReader(resp.Body, 10000))
-		if err != nil {
-			errMsg = []byte(fmt.Sprintf("Unable to read error response body - %s", err.Error()))
-		}
-		fmt.Fprintf(os.Stderr, "Unable to connect to orchestrator at %s:%d status code %d- %s\n",
-			orchestratorHost, port, resp.StatusCode, string(errMsg))
-		os.Exit(1)
-	}
+
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancelChan := make(chan error, 1)
 
-	cancelChan := make(chan error)
-
-	// listen for cancellations
 	go func() {
 		<-cancelChan
 		cancel()
 	}()
 
-	go heartbeat(ctx, cancelChan, &http.Request{Method: "POST", URL: &url.URL{Host: hostString, Path: "/heartbeat"}})
-
-	collector := metrics.NewPrometheusMetricsCollector(prometheus.DefaultRegisterer)
-	http.Handle("/metrics", promhttp.Handler())
+	go heartbeat(ctx, cancelChan, heartbeatURL)
 
 	workChan := make(chan types.Job)
 	for i := 0; i < workers; i++ {
 		go runJob(ctx, workChan, collector)
 	}
 
-	poll(ctx, workers, &http.Request{Method: "GET", URL: &url.URL{Host: hostString, Path: "/next"}}, workChan, cancelChan)
+	poll(ctx, nextURL, workChan, cancelChan)
 }
 
-func poll(ctx context.Context, workers int, req *http.Request, work chan types.Job, cancelChan chan error) {
-	request := req.WithContext(ctx)
-	buf := bytes.NewBuffer(make([]byte, 0, 1000))
-	encoder := json.NewEncoder(buf)
-	encoder.Encode(workerId)
+func serveMetrics(port int) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	server := &http.Server{
+		Addr:    fmt.Sprintf(":%d", port),
+		Handler: mux,
+	}
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Logger.Error("Executor metrics server failed", err)
+	}
+}
+
+func connect(connectURL string, workerId types.WorkerId) error {
+	req, err := newWorkerRequest(http.MethodPost, connectURL, workerId)
+	if err != nil {
+		return fmt.Errorf("unable to encode worker payload: %w", err)
+	}
+	resp, err := orchestratorClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("unable to connect to orchestrator at %s - %w", connectURL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		errMsg := readBody(resp.Body)
+		return fmt.Errorf("unable to connect to orchestrator at %s status code %d - %s",
+			connectURL, resp.StatusCode, errMsg)
+	}
+	return nil
+}
+
+func poll(ctx context.Context, nextURL string, work chan types.Job, cancelChan chan error) {
 	for {
-		// reset the body on each request so the buffer starts from 0 each time
-		req.Body = io.NopCloser(bytes.NewBuffer(buf.Bytes()))
-		resp, err := orchestratorClient.Do(request)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		req, err := newWorkerRequest(http.MethodPost, nextURL, workerId)
+		if err != nil {
+			cancelChan <- fmt.Errorf("unable to create next request payload %w", err)
+			return
+		}
+		req = req.WithContext(ctx)
+
+		resp, err := orchestratorClient.Do(req)
 		if err != nil {
 			cancelChan <- fmt.Errorf("unable to get job from orchestrator %w", err)
 			return
 		}
-		// orchestrator is telling us the job is done
-		if resp.StatusCode == 204 {
+		if resp.StatusCode == http.StatusNoContent {
+			_ = resp.Body.Close()
 			cancelChan <- errors.New("status complete")
 			return
 		}
-		if resp.StatusCode != 200 {
-			errorMsg, err := io.ReadAll(io.LimitReader(resp.Body, 10000))
-			if err != nil {
-				errorMsg = []byte(fmt.Sprintf("Unable to read error message from orchestrator: %v", err))
-			}
-			cancelChan <- fmt.Errorf("error response fetching job from orchestrator: %d- %s",
-				resp.StatusCode,
-				string(errorMsg))
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			_ = resp.Body.Close()
+			cancelChan <- errors.New("orchestrator shutting down")
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			errorMsg := readBody(resp.Body)
+			_ = resp.Body.Close()
+			cancelChan <- fmt.Errorf("error response fetching job from orchestrator: %d - %s",
+				resp.StatusCode, errorMsg)
 			return
 		}
 		decoder := json.NewDecoder(resp.Body)
-		jobs := make([]types.Job, workers)
-		decoder.Decode(&jobs)
-		for j := range jobs {
-			work <- jobs[j]
+		jobs := make([]types.Job, 0, workerId.Workers)
+		if err := decoder.Decode(&jobs); err != nil {
+			_ = resp.Body.Close()
+			cancelChan <- fmt.Errorf("unable to decode jobs response: %w", err)
+			return
+		}
+		_ = resp.Body.Close()
+		for _, job := range jobs {
+			work <- job
 		}
 	}
 }
@@ -145,23 +178,50 @@ func runJob(ctx context.Context, work chan types.Job, metricsCollector metrics.M
 
 var heartbeatError = errors.New("unable to publish heartbeat")
 
-func heartbeat(ctx context.Context, cancel chan error, req *http.Request) {
+func heartbeat(ctx context.Context, cancel chan error, heartbeatURL string) {
 	ticker := time.NewTicker(manager.HeartbeatFrequencySeconds * time.Second)
-	heartbeatFailures := 0
-	request := req.WithContext(ctx)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			resp, err := orchestratorClient.Do(request)
-			if err != nil || resp.StatusCode != 200 {
-				heartbeatFailures++
+			req, err := newWorkerRequest(http.MethodPost, heartbeatURL, workerId)
+			if err != nil {
+				cancel <- err
+				return
 			}
-			if heartbeatFailures > manager.MaxMissedHeartbeats {
-				fmt.Fprintln(os.Stderr, "Unable to publish heartbeat to orchestrator. Canceling executor process")
+			req = req.WithContext(ctx)
+			resp, err := orchestratorClient.Do(req)
+			if err != nil || resp.StatusCode != http.StatusOK {
 				cancel <- heartbeatError
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				return
 			}
+			_ = resp.Body.Close()
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+func newWorkerRequest(method string, endpoint string, worker types.WorkerId) (*http.Request, error) {
+	payload, err := json.Marshal(worker)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(method, endpoint, bytes.NewBuffer(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return req, nil
+}
+
+func readBody(body io.Reader) string {
+	bytesRead, err := io.ReadAll(io.LimitReader(body, 10000))
+	if err != nil {
+		return fmt.Sprintf("unable to read response body: %v", err)
+	}
+	return string(bytesRead)
 }
