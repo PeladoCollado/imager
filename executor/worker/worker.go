@@ -7,7 +7,6 @@ import (
 	"github.com/PeladoCollado/imager/orchestrator/logger"
 	"github.com/PeladoCollado/imager/types"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"time"
@@ -29,7 +28,7 @@ func RunJob(ctx context.Context, job types.Job, metricsCollector metrics.Metrics
 		ticker := time.NewTicker(time.Second)
 		for {
 			select {
-			case <- ticker.C:
+			case <-ticker.C:
 				ctx, cancel := context.WithTimeout(ctx, time.Second)
 
 				// request handling is single threaded. to increase parallelization, expect num workers to increase
@@ -88,7 +87,7 @@ func executeRequest(reqChan chan *http.Request,
 				errChan <- metrics.ErrorEvent{0, err.Error(), fbDuration}
 			} else if response.StatusCode >= 300 {
 				limit := io.LimitReader(response.Body, 3000) // read the error, but limit the size
-				errMsg, err := ioutil.ReadAll(limit)
+				errMsg, err := io.ReadAll(limit)
 				if err != nil {
 					errMsg = []byte(fmt.Sprint("Unable to read error message from response ", err))
 				}

@@ -7,17 +7,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/PeladoCollado/imager/executor/worker"
 	"github.com/PeladoCollado/imager/metrics"
 	"github.com/PeladoCollado/imager/orchestrator/logger"
 	"github.com/PeladoCollado/imager/orchestrator/manager"
 	"github.com/PeladoCollado/imager/types"
-	"github.com/PeladoCollado/imager/executor/worker"
 	"github.com/google/uuid"
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -46,7 +45,7 @@ func main() {
 	hostString := fmt.Sprintf("%s:%d", orchestratorHost, port)
 	connectUrl := fmt.Sprintf("http://%s/connect", hostString)
 
-	workerUuid, err :=  uuid.NewRandom()
+	workerUuid, err := uuid.NewRandom()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to generate executor id: %v", err)
 		os.Exit(1)
@@ -65,7 +64,7 @@ func main() {
 		os.Exit(1)
 	}
 	if resp.StatusCode != 200 {
-		errMsg, err := ioutil.ReadAll(io.LimitReader(resp.Body, 10000))
+		errMsg, err := io.ReadAll(io.LimitReader(resp.Body, 10000))
 		if err != nil {
 			errMsg = []byte(fmt.Sprintf("Unable to read error response body - %s", err.Error()))
 		}
@@ -79,7 +78,7 @@ func main() {
 
 	// listen for cancellations
 	go func() {
-		<- cancelChan
+		<-cancelChan
 		cancel()
 	}()
 
@@ -103,7 +102,7 @@ func poll(ctx context.Context, workers int, req *http.Request, work chan types.J
 	encoder.Encode(workerId)
 	for {
 		// reset the body on each request so the buffer starts from 0 each time
-		req.Body = ioutil.NopCloser(bytes.NewBuffer(buf.Bytes()))
+		req.Body = io.NopCloser(bytes.NewBuffer(buf.Bytes()))
 		resp, err := orchestratorClient.Do(request)
 		if err != nil {
 			cancelChan <- fmt.Errorf("unable to get job from orchestrator %w", err)
@@ -115,7 +114,7 @@ func poll(ctx context.Context, workers int, req *http.Request, work chan types.J
 			return
 		}
 		if resp.StatusCode != 200 {
-			errorMsg, err := ioutil.ReadAll(io.LimitReader(resp.Body, 10000))
+			errorMsg, err := io.ReadAll(io.LimitReader(resp.Body, 10000))
 			if err != nil {
 				errorMsg = []byte(fmt.Sprintf("Unable to read error message from orchestrator: %v", err))
 			}

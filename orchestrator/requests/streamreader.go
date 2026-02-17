@@ -6,7 +6,6 @@ import (
 	"errors"
 	"github.com/PeladoCollado/imager/types"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -63,7 +62,7 @@ func (s *StreamReader) Next() (*http.Request, error) {
 	}
 	var body io.ReadCloser
 	if next.Body != "" {
-		body = ioutil.NopCloser(bytes.NewBufferString(next.Body))
+		body = io.NopCloser(bytes.NewBufferString(next.Body))
 	}
 	return &http.Request{
 		Method: next.Method,
@@ -84,5 +83,5 @@ func (s *StreamReader) Reset() error {
 
 func (s *StreamReader) Read(resp *http.Response) (int64, error) {
 	// we don't care about the response here
-	return io.Copy(ioutil.Discard, resp.Body)
+	return io.Copy(io.Discard, resp.Body)
 }
