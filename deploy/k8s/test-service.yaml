@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: imager-test-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: imager-test-service
+  template:
+    metadata:
+      labels:
+        app: imager-test-service
+    spec:
+      containers:
+        - name: app
+          image: hashicorp/http-echo:1.0.0
+          args: ["-text=imager test service", "-listen=:8080"]
+          ports:
+            - name: http
+              containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: imager-test-service
+spec:
+  selector:
+    app: imager-test-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

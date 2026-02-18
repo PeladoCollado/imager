@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: imager-executor
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: imager-executor
+  template:
+    metadata:
+      labels:
+        app: imager-executor
+    spec:
+      containers:
+        - name: executor
+          image: imager/executor:local
+          imagePullPolicy: IfNotPresent
+          args:
+            - -host=imager-orchestrator
+            - -port=8099
+            - -workers=2
+            - -metrics-port=9100
+          ports:
+            - name: metrics
+              containerPort: 9100
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: imager-executor-metrics
+spec:
+  selector:
+    app: imager-executor
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: metrics

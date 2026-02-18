@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: imager-orchestrator
+  namespace: imager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: imager-orchestrator
+  template:
+    metadata:
+      labels:
+        app: imager-orchestrator
+    spec:
+      serviceAccountName: imager-orchestrator
+      containers:
+        - name: orchestrator
+          image: imager/orchestrator:local
+          imagePullPolicy: IfNotPresent
+          args:
+            - -listen-port=8099
+            - -target-mode=service
+            - -target-namespace=imager
+            - -target-service=imager-test-service
+            - -target-port-name=http
+            - -target-scheme=http
+            - -request-source-file=/config/requests.json
+            - -load-calculator=step
+            - -min-rps=5
+            - -max-rps=50
+            - -step-rps=5
+            - -schedule-interval=1s
+            - -job-duration=1s
+            - -metrics-poll-interval=5s
+            - -in-cluster=true
+          ports:
+            - name: http
+              containerPort: 8099
+          volumeMounts:
+            - name: request-source
+              mountPath: /config
+      volumes:
+        - name: request-source
+          configMap:
+            name: imager-request-source
