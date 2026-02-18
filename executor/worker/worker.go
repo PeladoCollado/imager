@@ -17,6 +17,8 @@ import (
 var client http.Client
 
 func RunJob(ctx context.Context, job types.Job, metricsCollector metrics.MetricsCollector) {
+	metricsCollector.RecordJobPickedUp(job.RequestedCount())
+
 	jobDuration := job.Duration()
 	if jobDuration <= 0 {
 		jobDuration = time.Second

@@ -4,7 +4,7 @@ type LoadCalculator interface {
 	Next() int
 }
 
-func NewStepFunctionLoadCalculator(minRps int, maxRps int, stepSize int) LoadCalculator{
+func NewStepFunctionLoadCalculator(minRps int, maxRps int, stepSize int) LoadCalculator {
 	return &StepFunctionLoadCalculator{minRps: minRps, maxRps: maxRps, stepSize: stepSize, currRps: minRps}
 }
 

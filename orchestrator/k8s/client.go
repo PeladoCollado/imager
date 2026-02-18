@@ -3,117 +3,261 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"math/rand"
+	"path/filepath"
+	"sort"
+	"sync"
+
+	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
-	metrics "k8s.io/metrics/pkg/client/clientset/versioned"
-	"k8s.io/metrics/pkg/client/clientset/versioned/typed/metrics/v1beta1"
-	"path/filepath"
+	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
-type BasePathConfig map[string]string
+type TargetMode string
 
-type BasePathSupplier interface {
-	BuildPath(config BasePathConfig) string
+const (
+	TargetModePod     TargetMode = "pod"
+	TargetModeService TargetMode = "service"
+)
+
+type PodUsage struct {
+	CPUMillicores int64
+	MemoryBytes   int64
 }
 
-func NewPodClient(ctx context.Context, config *rest.Config, namespace string, label string, container string, portname string) (*PodClient, error) {
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	pod, err := selectPod(ctx, clientset, namespace, label)
-	if err != nil {
-		return nil, err
-	}
+type Client struct {
+	kubeClient    kubernetes.Interface
+	metricsClient metricsclient.Interface
+}
 
-	metricsClient, err := metrics.NewForConfig(config)
+func NewClient(config *rest.Config) (*Client, error) {
+	kubeClient, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, err
 	}
-	metricses := metricsClient.MetricsV1beta1().PodMetricses(namespace)
+	metricsAPI, err := metricsclient.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{kubeClient: kubeClient, metricsClient: metricsAPI}, nil
+}
 
-	return &PodClient{
-		ctx:       ctx,
-		namespace: namespace,
-		label:     label,
-		container: container,
-		portname:  portname,
-		pod:       pod,
-		m:         metricses,
-		clientset: clientset,
+func NewClientWithClients(kubeClient kubernetes.Interface, metricsAPI metricsclient.Interface) *Client {
+	return &Client{kubeClient: kubeClient, metricsClient: metricsAPI}
+}
+
+func (c *Client) PodsForDeployment(ctx context.Context, namespace string, deploymentName string) ([]v1.Pod, error) {
+	deployment, err := c.kubeClient.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	selector, err := selectorForDeployment(deployment)
+	if err != nil {
+		return nil, err
+	}
+	pods, err := c.kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector.String(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return runningPods(pods.Items), nil
+}
+
+func (c *Client) PodsForService(ctx context.Context, namespace string, serviceName string) ([]v1.Pod, error) {
+	service, err := c.kubeClient.CoreV1().Services(namespace).Get(ctx, serviceName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if len(service.Spec.Selector) == 0 {
+		return nil, fmt.Errorf("service %s/%s has no selector labels", namespace, serviceName)
+	}
+	selector := labels.SelectorFromSet(service.Spec.Selector)
+	pods, err := c.kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector.String(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return runningPods(pods.Items), nil
+}
+
+func (c *Client) PodResourceUsage(ctx context.Context, namespace string, podNames []string) (map[string]PodUsage, error) {
+	usageByPod := make(map[string]PodUsage, len(podNames))
+	for _, podName := range podNames {
+		metrics, err := c.metricsClient.MetricsV1beta1().PodMetricses(namespace).Get(ctx, podName, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		var cpuMilli int64
+		var memoryBytes int64
+		for _, container := range metrics.Containers {
+			cpuMilli += container.Usage.Cpu().MilliValue()
+			memoryBytes += container.Usage.Memory().Value()
+		}
+		usageByPod[podName] = PodUsage{
+			CPUMillicores: cpuMilli,
+			MemoryBytes:   memoryBytes,
+		}
+	}
+	return usageByPod, nil
+}
+
+func SelectRandomPod(pods []v1.Pod) (*v1.Pod, error) {
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("no pods available")
+	}
+	index := rand.Intn(len(pods))
+	return &pods[index], nil
+}
+
+func BuildTargetURLs(pods []v1.Pod, portName string, scheme string) []string {
+	if scheme == "" {
+		scheme = "http"
+	}
+	urls := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		if pod.Status.PodIP == "" {
+			continue
+		}
+		port := findPort(pod, portName)
+		urls = append(urls, fmt.Sprintf("%s://%s:%d", scheme, pod.Status.PodIP, port))
+	}
+	sort.Strings(urls)
+	return urls
+}
+
+type TargetResolverConfig struct {
+	Mode       TargetMode
+	Namespace  string
+	Deployment string
+	Service    string
+	PortName   string
+	Scheme     string
+}
+
+type TargetResolver struct {
+	client *Client
+	cfg    TargetResolverConfig
+
+	lock     sync.RWMutex
+	lastPods []v1.Pod
+}
+
+func NewTargetResolver(client *Client, cfg TargetResolverConfig) (*TargetResolver, error) {
+	if cfg.Namespace == "" {
+		return nil, fmt.Errorf("namespace is required")
+	}
+	switch cfg.Mode {
+	case TargetModePod:
+		if cfg.Deployment == "" {
+			return nil, fmt.Errorf("deployment is required in pod mode")
+		}
+	case TargetModeService:
+		if cfg.Service == "" {
+			return nil, fmt.Errorf("service is required in service mode")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported target mode %q", cfg.Mode)
+	}
+	return &TargetResolver{
+		client: client,
+		cfg:    cfg,
 	}, nil
 }
 
-func selectPod(ctx context.Context, clientset *kubernetes.Clientset, namespace string, label string) (v1.Pod, error) {
-	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: label, Limit: 100})
-	if err != nil {
-		return v1.Pod{}, err
-	}
-	count := len(pods.Items)
-	itm := rand.IntnRange(0, count)
-	return pods.Items[itm], nil
-}
-
-type PodClient struct {
-	ctx       context.Context
-	namespace string
-	label     string
-	container string
-	portname  string
-	pod       v1.Pod
-	m         v1beta1.PodMetricsInterface
-	clientset *kubernetes.Clientset
-}
-
-func (pc *PodClient) BuildPath(conf BasePathConfig) string {
-	ip := pc.pod.Status.PodIP
-
-	var port int32
-
-portsearch:
-	for _, c := range pc.pod.Spec.Containers {
-		for _, p := range c.Ports {
-			if p.Name == pc.portname {
-				port = p.ContainerPort
-				break portsearch
-			}
-		}
-	}
-	return fmt.Sprintf("http://%s:%d/", ip, port)
-}
-
-func (pc *PodClient) GetMetrics() (map[string]interface{}, error) {
-	podMetrics, err := pc.m.Get(pc.ctx, pc.pod.Name, metav1.GetOptions{})
+func (r *TargetResolver) ResolveTargets(ctx context.Context) ([]string, error) {
+	pods, err := r.resolvePods(ctx)
 	if err != nil {
 		return nil, err
 	}
-	metricsMap := make(map[string]interface{})
-	for _, c := range podMetrics.Containers {
-		if c.Name == pc.container {
-			for k, v := range c.Usage {
-				i64, b := v.AsInt64()
-				if b {
-					metricsMap[string(k)] = i64
-				} else {
-					metricsMap[string(k)] = v.AsDec()
-				}
+	r.lock.Lock()
+	r.lastPods = append([]v1.Pod(nil), pods...)
+	r.lock.Unlock()
+	return BuildTargetURLs(pods, r.cfg.PortName, r.cfg.Scheme), nil
+}
+
+func (r *TargetResolver) CurrentPods(ctx context.Context) ([]v1.Pod, error) {
+	r.lock.RLock()
+	if len(r.lastPods) > 0 {
+		pods := append([]v1.Pod(nil), r.lastPods...)
+		r.lock.RUnlock()
+		return pods, nil
+	}
+	r.lock.RUnlock()
+
+	pods, err := r.resolvePods(ctx)
+	if err != nil {
+		return nil, err
+	}
+	r.lock.Lock()
+	r.lastPods = append([]v1.Pod(nil), pods...)
+	r.lock.Unlock()
+	return pods, nil
+}
+
+func (r *TargetResolver) resolvePods(ctx context.Context) ([]v1.Pod, error) {
+	switch r.cfg.Mode {
+	case TargetModePod:
+		pods, err := r.client.PodsForDeployment(ctx, r.cfg.Namespace, r.cfg.Deployment)
+		if err != nil {
+			return nil, err
+		}
+		selectedPod, err := SelectRandomPod(pods)
+		if err != nil {
+			return nil, err
+		}
+		return []v1.Pod{*selectedPod}, nil
+	case TargetModeService:
+		return r.client.PodsForService(ctx, r.cfg.Namespace, r.cfg.Service)
+	default:
+		return nil, fmt.Errorf("unsupported target mode %q", r.cfg.Mode)
+	}
+}
+
+func selectorForDeployment(deployment *appsv1.Deployment) (labels.Selector, error) {
+	if deployment.Spec.Selector == nil {
+		return nil, fmt.Errorf("deployment %s has nil selector", deployment.Name)
+	}
+	return metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+}
+
+func runningPods(pods []v1.Pod) []v1.Pod {
+	result := make([]v1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if pod.Status.Phase == v1.PodRunning {
+			result = append(result, pod)
+		}
+	}
+	return result
+}
+
+func findPort(pod v1.Pod, portName string) int32 {
+	for _, container := range pod.Spec.Containers {
+		for _, port := range container.Ports {
+			if portName == "" || port.Name == portName {
+				return port.ContainerPort
 			}
 		}
 	}
-	return metricsMap, nil
+	return 80
 }
 
 func InitInCluster() (*rest.Config, error) {
 	return rest.InClusterConfig()
 }
 
-func InitOffCluster() (*rest.Config, error) {
-	home := homedir.HomeDir()
-	path := filepath.Join(home, ".kube", "config")
+func InitOffCluster(kubeconfigPath string) (*rest.Config, error) {
+	path := kubeconfigPath
+	if path == "" {
+		home := homedir.HomeDir()
+		path = filepath.Join(home, ".kube", "config")
+	}
 	return clientcmd.BuildConfigFromFlags("", path)
 }

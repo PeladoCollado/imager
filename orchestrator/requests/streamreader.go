@@ -27,25 +27,30 @@ func NewFileReader(file string) (types.RequestSource, error) {
 }
 
 func (s *StreamReader) Next() (types.RequestSpec, error) {
-	next := types.RequestSpec{}
-	err := s.decoder.Decode(&next)
-	if errors.Is(err, io.EOF) {
-		err = s.Reset()
+	for {
+		next := types.RequestSpec{}
+		err := s.decoder.Decode(&next)
+		if errors.Is(err, io.EOF) {
+			if resetErr := s.Reset(); resetErr != nil {
+				return types.RequestSpec{}, resetErr
+			}
+			continue
+		}
 		if err != nil {
 			return types.RequestSpec{}, err
 		}
-		return s.Next()
+		return next, nil
 	}
-	if err != nil {
-		return types.RequestSpec{}, err
-	}
-	return next, nil
 }
 
 func (s *StreamReader) Reset() error {
 	if seeker, ok := s.r.(io.Seeker); ok {
 		_, err := seeker.Seek(0, io.SeekStart)
-		return err
+		if err != nil {
+			return err
+		}
+		s.decoder = json.NewDecoder(s.r)
+		return nil
 	} else {
 		return io.EOF
 	}
