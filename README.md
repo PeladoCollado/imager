@@ -59,7 +59,7 @@ kubectl get --raw '/api/v1/namespaces/imager/services/http:imager-executor-metri
 
 For a complete demo runbook, see `docs/DEMO_SUMSERVICE.md`.
 
-## 2. Run Imager On Its Own (Built-In Capabilities)
+## 2. Run Imager On Its Own (Built-In + Config-Only Customization)
 
 If you want to run the load generator without the sumservice demo, use the built-in stack in `deploy/k8s`:
 - built-in target deployment/service: `imager-test-service`
@@ -100,31 +100,74 @@ kubectl apply -f deploy/k8s/orchestrator-service-mode.yaml
 kubectl -n imager rollout status deploy/imager-orchestrator --timeout=180s
 ```
 
-More local-cluster notes are in `docs/LOCAL_KIND.md`.
+### Config-only customization (no code changes)
 
-## 3. Customize Request Source And Load Calculator
+#### StreamReader file source (JSON records, one per line)
 
-### Config-only customization
+The built-in `file` request source uses `StreamReader`, which reads newline-delimited JSON records.
+Each line is one `RequestSpec` object. Supported fields:
+- `method` (required)
+- `path` (required)
+- `queryString` (optional)
+- `headers` (optional map of string to array of strings)
+- `body` (optional)
 
-1. File request source (no code changes):
-- edit request specs in `deploy/k8s/configmap-requests.yaml` (`requests.json`)
-- apply and restart orchestrator:
-```bash
-kubectl -n imager apply -f deploy/k8s/configmap-requests.yaml
-kubectl -n imager rollout restart deploy/imager-orchestrator
+Example file:
+
+```json
+{"method":"GET","path":"/"}
+{"method":"GET","path":"/status"}
+{"method":"GET","path":"/anything","headers":{"X-Imager-Run":["true"]}}
+{"method":"POST","path":"/submit","headers":{"Content-Type":["application/json"]},"body":"{\"run\":\"demo\"}"}
 ```
 
-2. Random-sum request source:
-- in orchestrator args, set:
+You can start from `deploy/examples/requests.json`.
+
+To configure deployment to use this file:
+
+1. Put the records into the cluster ConfigMap used by the orchestrator:
+```bash
+kubectl -n imager create configmap imager-request-source \
+  --from-file=requests.json=./deploy/examples/requests.json \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+2. Ensure orchestrator deployment points to file mode and the mounted path:
+- `-request-source-type=file`
+- `-request-source-file=/config/requests.json`
+- volume mount at `/config` from ConfigMap `imager-request-source`
+
+The default manifests in `deploy/k8s/orchestrator-pod-mode.yaml` and
+`deploy/k8s/orchestrator-service-mode.yaml` already use this path. If you changed them,
+re-apply your chosen manifest before restarting:
+```bash
+kubectl apply -f deploy/k8s/orchestrator-pod-mode.yaml
+# or
+kubectl apply -f deploy/k8s/orchestrator-service-mode.yaml
+```
+
+3. Restart orchestrator:
+```bash
+kubectl -n imager rollout restart deploy/imager-orchestrator
+kubectl -n imager rollout status deploy/imager-orchestrator --timeout=180s
+```
+
+If you use a different filename or mount path, update `-request-source-file` accordingly.
+
+#### Random-sum request source
+
+In orchestrator args, set:
 ```yaml
 - -request-source-type=random-sum
 - -random-sum-path=/sum
 - -random-sum-min=1
 - -random-sum-max=1000
 ```
-- remove `-request-source-file=...` and the `/config` ConfigMap volume mount from the orchestrator manifest
 
-3. Built-in load calculators:
+If you switch fully to random-sum, remove `-request-source-file=...` and the `/config` ConfigMap volume mount.
+
+#### Built-in load calculators
+
 - `-load-calculator=step` with `-min-rps`, `-max-rps`, `-step-rps`
 - `-load-calculator=exponential` with `-min-rps`, `-max-rps`
 - `-load-calculator=logarithmic` with `-min-rps`, `-max-rps`
@@ -137,7 +180,9 @@ Example step profile from 10 to 500 rps:
 - -step-rps=10
 ```
 
-### Code-level customization
+More local-cluster notes are in `docs/LOCAL_KIND.md`.
+
+## 3. Code-level customization
 
 1. Custom request source:
 - implement `types.RequestSource` in `types/types.go` (`Next()` and `Reset()`)
@@ -145,10 +190,128 @@ Example step profile from 10 to 500 rps:
 - wire it in `newRequestSource()` in `orchestrator/orchestrator.go`
 - add flags/validation in `parseConfig()` and `validateConfig()`
 
+Example: database-backed request source (reads one record per `Next()` call and loops on EOF):
+
+```go
+package requests
+
+import (
+	"database/sql"
+	"errors"
+	"sync"
+
+	"github.com/PeladoCollado/imager/types"
+)
+
+type DBRequestSource struct {
+	db     *sql.DB
+	mu     sync.Mutex
+	offset int
+}
+
+func NewDBRequestSource(db *sql.DB) *DBRequestSource {
+	return &DBRequestSource{db: db}
+}
+
+func (s *DBRequestSource) Next() (types.RequestSpec, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	req, err := s.queryByOffset(s.offset)
+	if errors.Is(err, sql.ErrNoRows) {
+		s.offset = 0
+		req, err = s.queryByOffset(s.offset)
+	}
+	if err != nil {
+		return types.RequestSpec{}, err
+	}
+	s.offset++
+	return req, nil
+}
+
+func (s *DBRequestSource) queryByOffset(offset int) (types.RequestSpec, error) {
+	row := s.db.QueryRow(`
+		SELECT method, path, query_string, body
+		FROM request_specs
+		ORDER BY id LIMIT 1 OFFSET ?`, offset)
+
+	var req types.RequestSpec
+	var queryString sql.NullString
+	var body sql.NullString
+	err := row.Scan(&req.Method, &req.Path, &queryString, &body)
+	if err != nil {
+		return types.RequestSpec{}, err
+	}
+
+	if queryString.Valid {
+		req.QueryString = queryString.String
+	}
+	if body.Valid {
+		req.Body = body.String
+	}
+	return req, nil
+}
+
+func (s *DBRequestSource) Reset() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.offset = 0
+	return nil
+}
+```
+
 2. Custom load calculator:
 - implement `manager.LoadCalculator` in `orchestrator/manager/loadcalc.go` (`Next()`)
 - wire it in `newLoadCalculator()` in `orchestrator/orchestrator.go`
 - add/update unit tests in `orchestrator/manager/loadcalc_test.go`
+
+Example: random spike load calculator (baseline load with occasional large spikes):
+
+```go
+package manager
+
+import (
+	"math/rand"
+	"time"
+)
+
+type RandomSpikeLoadCalculator struct {
+	minRPS      int
+	maxRPS      int
+	baselineRPS int
+	maxSpikeRPS int
+	spikeChance int // 0-100
+	rng         *rand.Rand
+}
+
+func NewRandomSpikeLoadCalculator(minRPS, maxRPS, baselineRPS, maxSpikeRPS, spikeChance int) LoadCalculator {
+	return &RandomSpikeLoadCalculator{
+		minRPS:      minRPS,
+		maxRPS:      maxRPS,
+		baselineRPS: baselineRPS,
+		maxSpikeRPS: maxSpikeRPS,
+		spikeChance: spikeChance,
+		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
+	}
+}
+
+func (c *RandomSpikeLoadCalculator) Next() int {
+	rps := c.baselineRPS
+	if c.rng.Intn(100) < c.spikeChance {
+		rps += c.rng.Intn(c.maxSpikeRPS + 1)
+	}
+	if rps < c.minRPS {
+		return c.minRPS
+	}
+	if rps > c.maxRPS {
+		return c.maxRPS
+	}
+	return rps
+}
+```
+
+You would then add a new `-load-calculator=random-spike` branch in `newLoadCalculator()`
+and parse any required spike parameters in `parseConfig()`.
 
 3. Rebuild and redeploy:
 ```bash
