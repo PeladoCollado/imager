@@ -23,3 +23,10 @@ Imager is a Kubernetes-native distributed load-testing system with two processes
 Kubernetes manifests and local cluster instructions are under:
 - `deploy/k8s/`
 - `docs/LOCAL_KIND.md`
+
+## Sum Service Demo
+
+An end-to-end demo for local kind includes:
+- demo app in `sumservice/`
+- manifests in `deploy/demo/`
+- runbook in `docs/DEMO_SUMSERVICE.md`

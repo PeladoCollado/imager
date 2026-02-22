@@ -11,6 +11,7 @@ import (
 	"github.com/PeladoCollado/imager/orchestrator/logger"
 	"github.com/PeladoCollado/imager/orchestrator/manager"
 	"github.com/PeladoCollado/imager/orchestrator/requests"
+	"github.com/PeladoCollado/imager/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	v1 "k8s.io/api/core/v1"
@@ -32,7 +33,11 @@ type config struct {
 	TargetPortName   string
 	TargetScheme     string
 
+	RequestSourceType string
 	RequestSourceFile string
+	RandomSumPath     string
+	RandomSumMin      int
+	RandomSumMax      int
 
 	LoadCalculator string
 	MinRPS         int
@@ -68,7 +73,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	source, err := requests.NewFileReader(cfg.RequestSourceFile)
+	source, err := newRequestSource(cfg)
 	if err != nil {
 		logger.Logger.Error("Unable to initialize request source", err)
 		os.Exit(1)
@@ -145,7 +150,11 @@ func parseConfig() config {
 	flag.StringVar(&cfg.TargetPortName, "target-port-name", "http", "Target container port name")
 	flag.StringVar(&cfg.TargetScheme, "target-scheme", "http", "Target request URL scheme")
 
+	flag.StringVar(&cfg.RequestSourceType, "request-source-type", "file", "Request source type: file or random-sum")
 	flag.StringVar(&cfg.RequestSourceFile, "request-source-file", "/config/requests.json", "Path to request source JSON file")
+	flag.StringVar(&cfg.RandomSumPath, "random-sum-path", "/sum", "Path to call when using the random-sum request source")
+	flag.IntVar(&cfg.RandomSumMin, "random-sum-min", 1, "Minimum random value used by random-sum request source")
+	flag.IntVar(&cfg.RandomSumMax, "random-sum-max", 100, "Maximum random value used by random-sum request source")
 
 	flag.StringVar(&cfg.LoadCalculator, "load-calculator", "step", "Load calculator: step, exponential, logarithmic")
 	flag.IntVar(&cfg.MinRPS, "min-rps", 1, "Minimum requests per second")
@@ -175,8 +184,17 @@ func validateConfig(cfg config) error {
 	if cfg.JobDuration <= 0 {
 		return fmt.Errorf("job-duration must be > 0")
 	}
-	if cfg.RequestSourceFile == "" {
-		return fmt.Errorf("request-source-file is required")
+	switch cfg.RequestSourceType {
+	case "file":
+		if cfg.RequestSourceFile == "" {
+			return fmt.Errorf("request-source-file is required when request-source-type=file")
+		}
+	case "random-sum":
+		if cfg.RandomSumMax < cfg.RandomSumMin {
+			return fmt.Errorf("random-sum-max must be >= random-sum-min")
+		}
+	default:
+		return fmt.Errorf("unsupported request-source-type %q", cfg.RequestSourceType)
 	}
 	switch cfg.TargetMode {
 	case string(k8s.TargetModePod):
@@ -213,6 +231,17 @@ func newLoadCalculator(cfg config) (manager.LoadCalculator, error) {
 		return manager.NewLogarithmicLoadCalculator(cfg.MinRPS, cfg.MaxRPS), nil
 	default:
 		return nil, fmt.Errorf("unsupported load-calculator %q", cfg.LoadCalculator)
+	}
+}
+
+func newRequestSource(cfg config) (types.RequestSource, error) {
+	switch cfg.RequestSourceType {
+	case "file":
+		return requests.NewFileReader(cfg.RequestSourceFile)
+	case "random-sum":
+		return requests.NewRandomSumSource(cfg.RandomSumPath, cfg.RandomSumMin, cfg.RandomSumMax)
+	default:
+		return nil, fmt.Errorf("unsupported request-source-type %q", cfg.RequestSourceType)
 	}
 }
 
