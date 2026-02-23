@@ -184,11 +184,12 @@ More local-cluster notes are in `docs/LOCAL_KIND.md`.
 
 ## 3. Code-level customization
 
-1. Custom request source:
-- implement `types.RequestSource` in `types/types.go` (`Next()` and `Reset()`)
-- add constructor in `orchestrator/requests/`
-- wire it in `newRequestSource()` in `orchestrator/orchestrator.go`
-- add flags/validation in `parseConfig()` and `validateConfig()`
+Imager exposes an importable orchestrator runtime in `github.com/PeladoCollado/imager/orchestrator/app`.
+You can start the orchestrator from another project and inject custom factories without patching this repo.
+
+1. Implement custom components in your project:
+- a request source implementing `types.RequestSource`
+- a load calculator implementing `manager.LoadCalculator`
 
 Example: database-backed request source (reads one record per `Next()` call and loops on EOF):
 
@@ -260,10 +261,7 @@ func (s *DBRequestSource) Reset() error {
 }
 ```
 
-2. Custom load calculator:
-- implement `manager.LoadCalculator` in `orchestrator/manager/loadcalc.go` (`Next()`)
-- wire it in `newLoadCalculator()` in `orchestrator/orchestrator.go`
-- add/update unit tests in `orchestrator/manager/loadcalc_test.go`
+2. Implement a custom load calculator:
 
 Example: random spike load calculator (baseline load with occasional large spikes):
 
@@ -310,10 +308,61 @@ func (c *RandomSpikeLoadCalculator) Next() int {
 }
 ```
 
-You would then add a new `-load-calculator=random-spike` branch in `newLoadCalculator()`
-and parse any required spike parameters in `parseConfig()`.
+3. Start the orchestrator with custom factories from an external project:
 
-3. Rebuild and redeploy:
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+
+	imagerapp "github.com/PeladoCollado/imager/orchestrator/app"
+	"github.com/PeladoCollado/imager/orchestrator/manager"
+	"github.com/PeladoCollado/imager/types"
+)
+
+func main() {
+	cfg, err := imagerapp.ParseConfig(os.Args[1:])
+	if err != nil {
+		log.Fatalf("parse config: %v", err)
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	opts := imagerapp.RunOptions{
+		RequestSourceFactory: imagerapp.RequestSourceFactoryFunc(func(cfg imagerapp.Config) (types.RequestSource, error) {
+			if cfg.RequestSourceType == "db" {
+				// initialize DB connection/pool once in real code and reuse it.
+				return NewDBRequestSource(openDB()), nil
+			}
+			return imagerapp.NewBuiltInRequestSource(cfg)
+		}),
+		LoadCalculatorFactory: imagerapp.LoadCalculatorFactoryFunc(func(cfg imagerapp.Config) (manager.LoadCalculator, error) {
+			if cfg.LoadCalculator == "random-spike" {
+				return NewRandomSpikeLoadCalculator(cfg.MinRPS, cfg.MaxRPS, cfg.MinRPS, 400, 15), nil
+			}
+			return imagerapp.NewBuiltInLoadCalculator(cfg)
+		}),
+	}
+
+	if err := imagerapp.Run(ctx, cfg, opts); err != nil && !errors.Is(err, context.Canceled) {
+		log.Fatalf("run orchestrator: %v", err)
+	}
+}
+```
+
+With this setup:
+- `-request-source-type=db` uses your DB-backed source
+- `-load-calculator=random-spike` uses your spike calculator
+- all other values continue using built-in behavior via `NewBuiltInRequestSource` and `NewBuiltInLoadCalculator`
+
+4. Rebuild and redeploy:
 ```bash
 go test ./...
 docker build -t imager/orchestrator:local -f Dockerfile.orchestrator .
