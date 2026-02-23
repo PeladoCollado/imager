@@ -31,16 +31,6 @@ func Run(ctx context.Context, cfg Config, opts RunOptions) error {
 		return err
 	}
 
-	kubeConfig, err := initKubeConfig(cfg)
-	if err != nil {
-		return fmt.Errorf("initialize kubernetes config: %w", err)
-	}
-
-	kubeClient, err := k8s.NewClient(kubeConfig)
-	if err != nil {
-		return fmt.Errorf("initialize kubernetes clients: %w", err)
-	}
-
 	sourceFactory := requestSourceFactoryOrDefault(opts.RequestSourceFactory)
 	source, err := sourceFactory.NewRequestSource(cfg)
 	if err != nil {
@@ -53,11 +43,24 @@ func Run(ctx context.Context, cfg Config, opts RunOptions) error {
 		return fmt.Errorf("initialize load calculator: %w", err)
 	}
 
+	var kubeClient *k8s.Client
+	if k8s.TargetMode(cfg.TargetMode) != k8s.TargetModeURL {
+		kubeConfig, cfgErr := initKubeConfig(cfg)
+		if cfgErr != nil {
+			return fmt.Errorf("initialize kubernetes config: %w", cfgErr)
+		}
+		kubeClient, err = k8s.NewClient(kubeConfig)
+		if err != nil {
+			return fmt.Errorf("initialize kubernetes clients: %w", err)
+		}
+	}
+
 	resolverConfig := k8s.TargetResolverConfig{
 		Mode:       k8s.TargetMode(cfg.TargetMode),
 		Namespace:  cfg.TargetNamespace,
 		Deployment: cfg.TargetDeployment,
 		Service:    cfg.TargetService,
+		URL:        cfg.TargetURL,
 		PortName:   cfg.TargetPortName,
 		Scheme:     cfg.TargetScheme,
 	}
@@ -88,7 +91,9 @@ func Run(ctx context.Context, cfg Config, opts RunOptions) error {
 		},
 	)
 
-	go pollPodMetrics(ctx, targetResolver, kubeClient, cfg.TargetNamespace, orchestratorMetrics, cfg.MetricsPollInterval)
+	if k8s.TargetMode(cfg.TargetMode) != k8s.TargetModeURL {
+		go pollPodMetrics(ctx, targetResolver, kubeClient, cfg.TargetNamespace, orchestratorMetrics, cfg.MetricsPollInterval)
+	}
 
 	baseHandler := api.NewHandler(ctx)
 	mux := http.NewServeMux()

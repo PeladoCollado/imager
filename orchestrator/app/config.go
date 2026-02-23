@@ -3,6 +3,7 @@ package app
 import (
 	"flag"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/PeladoCollado/imager/orchestrator/k8s"
@@ -15,6 +16,7 @@ type Config struct {
 	TargetNamespace  string
 	TargetDeployment string
 	TargetService    string
+	TargetURL        string
 	TargetPortName   string
 	TargetScheme     string
 
@@ -68,10 +70,11 @@ func DefaultConfig() Config {
 func BindFlags(fs *flag.FlagSet, cfg *Config) {
 	fs.IntVar(&cfg.ListenPort, "listen-port", cfg.ListenPort, "Orchestrator API and metrics port")
 
-	fs.StringVar(&cfg.TargetMode, "target-mode", cfg.TargetMode, "Target mode: pod or service")
+	fs.StringVar(&cfg.TargetMode, "target-mode", cfg.TargetMode, "Target mode: pod, service, or url")
 	fs.StringVar(&cfg.TargetNamespace, "target-namespace", cfg.TargetNamespace, "Kubernetes namespace for the target")
 	fs.StringVar(&cfg.TargetDeployment, "target-deployment", cfg.TargetDeployment, "Target deployment name (pod mode)")
 	fs.StringVar(&cfg.TargetService, "target-service", cfg.TargetService, "Target service name (service mode)")
+	fs.StringVar(&cfg.TargetURL, "target-url", cfg.TargetURL, "Absolute target URL (url mode), e.g. https://api.example.com:443")
 	fs.StringVar(&cfg.TargetPortName, "target-port-name", cfg.TargetPortName, "Target container port name")
 	fs.StringVar(&cfg.TargetScheme, "target-scheme", cfg.TargetScheme, "Target request URL scheme")
 
@@ -105,9 +108,6 @@ func ParseConfig(args []string) (Config, error) {
 }
 
 func ValidateConfig(cfg Config) error {
-	if cfg.TargetNamespace == "" {
-		return fmt.Errorf("target-namespace is required")
-	}
 	if cfg.RequestSourceType == "" {
 		return fmt.Errorf("request-source-type is required")
 	}
@@ -131,12 +131,26 @@ func ValidateConfig(cfg Config) error {
 	}
 	switch cfg.TargetMode {
 	case string(k8s.TargetModePod):
+		if cfg.TargetNamespace == "" {
+			return fmt.Errorf("target-namespace is required in pod mode")
+		}
 		if cfg.TargetDeployment == "" {
 			return fmt.Errorf("target-deployment is required in pod mode")
 		}
 	case string(k8s.TargetModeService):
+		if cfg.TargetNamespace == "" {
+			return fmt.Errorf("target-namespace is required in service mode")
+		}
 		if cfg.TargetService == "" {
 			return fmt.Errorf("target-service is required in service mode")
+		}
+	case string(k8s.TargetModeURL):
+		if cfg.TargetURL == "" {
+			return fmt.Errorf("target-url is required in url mode")
+		}
+		parsed, err := url.Parse(cfg.TargetURL)
+		if err != nil || !parsed.IsAbs() {
+			return fmt.Errorf("target-url must be an absolute URL in url mode")
 		}
 	default:
 		return fmt.Errorf("unsupported target-mode %q", cfg.TargetMode)

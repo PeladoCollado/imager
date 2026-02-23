@@ -10,7 +10,7 @@ This project ships Kubernetes manifests for a complete local load-test stack:
 - Docker
 - kind and kubectl (for kind workflow)
 - A running k3s cluster (for k3s workflow)
-- metrics-server installed in the cluster (required for target CPU/memory metrics)
+- metrics-server installed in the cluster (required for pod/service target mode CPU/memory metrics)
 
 ## Build Images
 
@@ -67,6 +67,19 @@ kubectl apply -f deploy/k8s/orchestrator-service-mode.yaml
 kubectl -n imager rollout status deploy/imager-orchestrator
 ```
 
+## Switch to Arbitrary URL Mode
+
+To target an external or non-cluster URL:
+
+```bash
+kubectl apply -f deploy/k8s/orchestrator-url-mode.yaml
+kubectl -n imager rollout status deploy/imager-orchestrator
+```
+
+In URL mode:
+- orchestrator does not collect pod CPU/memory metrics
+- executor metrics still report request latency and errors (`imager_duration`, `imager_successDuration`, `imager_success`, `imager_failed`)
+
 ## Configure Requests
 
 Update the request source by editing:
@@ -85,6 +98,7 @@ kubectl -n imager rollout restart deploy/imager-orchestrator
 1. Build and publish images to a registry reachable by your k3s cluster, then update image references in:
 - `deploy/k8s/orchestrator-pod-mode.yaml`
 - `deploy/k8s/orchestrator-service-mode.yaml`
+- `deploy/k8s/orchestrator-url-mode.yaml` (if using URL mode)
 - `deploy/k8s/executor.yaml`
 
 2. Apply manifests:

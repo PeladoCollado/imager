@@ -100,6 +100,17 @@ kubectl apply -f deploy/k8s/orchestrator-service-mode.yaml
 kubectl -n imager rollout status deploy/imager-orchestrator --timeout=180s
 ```
 
+6. Optional: switch orchestrator to arbitrary URL mode:
+```bash
+kubectl apply -f deploy/k8s/orchestrator-url-mode.yaml
+kubectl -n imager rollout status deploy/imager-orchestrator --timeout=180s
+```
+
+In `url` mode:
+- no Kubernetes pod discovery is required
+- target pod CPU/memory metrics are not emitted
+- executor latency and error metrics are still emitted (`imager_duration`, `imager_successDuration`, `imager_success`, `imager_failed`)
+
 ### Config-only customization (no code changes)
 
 #### StreamReader file source (JSON records, one per line)
@@ -179,6 +190,19 @@ Example step profile from 10 to 500 rps:
 - -max-rps=500
 - -step-rps=10
 ```
+
+#### Target modes
+
+- `-target-mode=pod`:
+  - requires `-target-namespace` and `-target-deployment`
+  - orchestrator picks one pod and reports target pod CPU/memory metrics
+- `-target-mode=service`:
+  - requires `-target-namespace` and `-target-service`
+  - orchestrator targets all service backing pods and reports their CPU/memory metrics
+- `-target-mode=url`:
+  - requires `-target-url` (absolute URL, e.g. `https://api.example.com`)
+  - no pod metrics are collected
+  - executor request/error/latency metrics remain available
 
 More local-cluster notes are in `docs/LOCAL_KIND.md`.
 

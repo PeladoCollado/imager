@@ -25,6 +25,30 @@ func TestValidateConfigRejectsUnsupportedTargetMode(t *testing.T) {
 	}
 }
 
+func TestValidateConfigURLMode(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.TargetMode = "url"
+	cfg.TargetNamespace = ""
+	cfg.TargetDeployment = ""
+	cfg.TargetURL = "https://example.com"
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("expected url mode to validate, got: %v", err)
+	}
+}
+
+func TestValidateConfigURLModeRequiresAbsoluteURL(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.TargetMode = "url"
+	cfg.TargetNamespace = ""
+	cfg.TargetDeployment = ""
+	cfg.TargetURL = "example.com/no-scheme"
+
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatalf("expected url mode validation error for non-absolute URL")
+	}
+}
+
 func TestParseConfig(t *testing.T) {
 	cfg, err := ParseConfig([]string{
 		"-listen-port=8111",

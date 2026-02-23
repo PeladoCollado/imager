@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -24,6 +25,7 @@ type TargetMode string
 const (
 	TargetModePod     TargetMode = "pod"
 	TargetModeService TargetMode = "service"
+	TargetModeURL     TargetMode = "url"
 )
 
 type PodUsage struct {
@@ -138,6 +140,7 @@ type TargetResolverConfig struct {
 	Namespace  string
 	Deployment string
 	Service    string
+	URL        string
 	PortName   string
 	Scheme     string
 }
@@ -151,17 +154,34 @@ type TargetResolver struct {
 }
 
 func NewTargetResolver(client *Client, cfg TargetResolverConfig) (*TargetResolver, error) {
-	if cfg.Namespace == "" {
-		return nil, fmt.Errorf("namespace is required")
-	}
 	switch cfg.Mode {
 	case TargetModePod:
+		if cfg.Namespace == "" {
+			return nil, fmt.Errorf("namespace is required in pod mode")
+		}
+		if client == nil {
+			return nil, fmt.Errorf("kubernetes client is required in pod mode")
+		}
 		if cfg.Deployment == "" {
 			return nil, fmt.Errorf("deployment is required in pod mode")
 		}
 	case TargetModeService:
+		if cfg.Namespace == "" {
+			return nil, fmt.Errorf("namespace is required in service mode")
+		}
+		if client == nil {
+			return nil, fmt.Errorf("kubernetes client is required in service mode")
+		}
 		if cfg.Service == "" {
 			return nil, fmt.Errorf("service is required in service mode")
+		}
+	case TargetModeURL:
+		if cfg.URL == "" {
+			return nil, fmt.Errorf("url is required in url mode")
+		}
+		parsed, err := url.Parse(cfg.URL)
+		if err != nil || !parsed.IsAbs() {
+			return nil, fmt.Errorf("url must be absolute in url mode")
 		}
 	default:
 		return nil, fmt.Errorf("unsupported target mode %q", cfg.Mode)
@@ -173,6 +193,10 @@ func NewTargetResolver(client *Client, cfg TargetResolverConfig) (*TargetResolve
 }
 
 func (r *TargetResolver) ResolveTargets(ctx context.Context) ([]string, error) {
+	if r.cfg.Mode == TargetModeURL {
+		return []string{r.cfg.URL}, nil
+	}
+
 	pods, err := r.resolvePods(ctx)
 	if err != nil {
 		return nil, err
@@ -216,6 +240,8 @@ func (r *TargetResolver) resolvePods(ctx context.Context) ([]v1.Pod, error) {
 		return []v1.Pod{*selectedPod}, nil
 	case TargetModeService:
 		return r.client.PodsForService(ctx, r.cfg.Namespace, r.cfg.Service)
+	case TargetModeURL:
+		return []v1.Pod{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported target mode %q", r.cfg.Mode)
 	}

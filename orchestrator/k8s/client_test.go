@@ -178,3 +178,38 @@ func TestTargetResolverServiceMode(t *testing.T) {
 		t.Fatalf("unexpected targets: %+v", targets)
 	}
 }
+
+func TestTargetResolverURLMode(t *testing.T) {
+	resolver, err := NewTargetResolver(nil, TargetResolverConfig{
+		Mode: TargetModeURL,
+		URL:  "https://example.com:8443",
+	})
+	if err != nil {
+		t.Fatalf("unexpected resolver init error: %v", err)
+	}
+
+	targets, err := resolver.ResolveTargets(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected resolve error: %v", err)
+	}
+	if len(targets) != 1 || targets[0] != "https://example.com:8443" {
+		t.Fatalf("unexpected targets: %+v", targets)
+	}
+
+	pods, err := resolver.CurrentPods(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected current pods error: %v", err)
+	}
+	if len(pods) != 0 {
+		t.Fatalf("expected no pods in url mode, got %d", len(pods))
+	}
+}
+
+func TestTargetResolverURLModeRejectsInvalidURL(t *testing.T) {
+	if _, err := NewTargetResolver(nil, TargetResolverConfig{
+		Mode: TargetModeURL,
+		URL:  "example.com/no-scheme",
+	}); err == nil {
+		t.Fatalf("expected invalid url init error")
+	}
+}
