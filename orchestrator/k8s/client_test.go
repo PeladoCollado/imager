@@ -146,6 +146,9 @@ func TestTargetResolverServiceMode(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "target-svc", Namespace: namespace},
 		Spec: v1.ServiceSpec{
 			Selector: map[string]string{"app": "svc-target"},
+			Ports: []v1.ServicePort{
+				{Name: "http", Port: 8080},
+			},
 		},
 	}
 	pod := v1.Pod{
@@ -174,8 +177,38 @@ func TestTargetResolverServiceMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected resolve error: %v", err)
 	}
-	if len(targets) != 1 || targets[0] != "http://10.0.0.1:8080" {
+	if len(targets) != 1 || targets[0] != "http://target-svc.default.svc:8080" {
 		t.Fatalf("unexpected targets: %+v", targets)
+	}
+
+	pods, err := resolver.CurrentPods(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected current pods error: %v", err)
+	}
+	if len(pods) != 1 || pods[0].Name != "pod-running" {
+		t.Fatalf("unexpected resolved pods for metrics: %+v", pods)
+	}
+}
+
+func TestServiceTargetURL(t *testing.T) {
+	namespace := "default"
+	service := &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "target-svc", Namespace: namespace},
+		Spec: v1.ServiceSpec{
+			Ports: []v1.ServicePort{
+				{Name: "http", Port: 8080},
+			},
+		},
+	}
+	kubeClient := k8sfake.NewSimpleClientset(service)
+	client := NewClientWithClients(kubeClient, metricsfake.NewSimpleClientset())
+
+	targetURL, err := client.ServiceTargetURL(context.Background(), namespace, "target-svc", "http", "https")
+	if err != nil {
+		t.Fatalf("unexpected error resolving service target URL: %v", err)
+	}
+	if targetURL != "https://target-svc.default.svc:8080" {
+		t.Fatalf("unexpected service target URL: %s", targetURL)
 	}
 }
 

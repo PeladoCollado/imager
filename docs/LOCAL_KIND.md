@@ -60,7 +60,8 @@ kubectl -n imager port-forward svc/imager-executor-metrics 9100:9100
 ## Switch to Service Mode
 
 The default deployment targets one random pod from the target deployment.
-To target the service and collect/report metrics across all backing pods:
+In service mode, workers target the service endpoint (so Kubernetes load-balances across pods),
+while the orchestrator still collects/report metrics across all backing pods:
 
 ```bash
 kubectl apply -f deploy/k8s/orchestrator-service-mode.yaml

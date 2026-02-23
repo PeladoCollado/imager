@@ -204,6 +204,13 @@ func (r *TargetResolver) ResolveTargets(ctx context.Context) ([]string, error) {
 	r.lock.Lock()
 	r.lastPods = append([]v1.Pod(nil), pods...)
 	r.lock.Unlock()
+	if r.cfg.Mode == TargetModeService {
+		targetURL, urlErr := r.client.ServiceTargetURL(ctx, r.cfg.Namespace, r.cfg.Service, r.cfg.PortName, r.cfg.Scheme)
+		if urlErr != nil {
+			return nil, urlErr
+		}
+		return []string{targetURL}, nil
+	}
 	return BuildTargetURLs(pods, r.cfg.PortName, r.cfg.Scheme), nil
 }
 
@@ -271,6 +278,35 @@ func findPort(pod v1.Pod, portName string) int32 {
 				return port.ContainerPort
 			}
 		}
+	}
+	return 80
+}
+
+func (c *Client) ServiceTargetURL(ctx context.Context,
+	namespace string,
+	serviceName string,
+	portName string,
+	scheme string) (string, error) {
+	service, err := c.kubeClient.CoreV1().Services(namespace).Get(ctx, serviceName, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	if scheme == "" {
+		scheme = "http"
+	}
+	port := findServicePort(*service, portName)
+	host := fmt.Sprintf("%s.%s.svc", service.Name, namespace)
+	return fmt.Sprintf("%s://%s:%d", scheme, host, port), nil
+}
+
+func findServicePort(service v1.Service, portName string) int32 {
+	for _, port := range service.Spec.Ports {
+		if portName == "" || port.Name == portName {
+			return port.Port
+		}
+	}
+	if len(service.Spec.Ports) > 0 {
+		return service.Spec.Ports[0].Port
 	}
 	return 80
 }

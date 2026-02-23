@@ -198,7 +198,8 @@ Example step profile from 10 to 500 rps:
   - orchestrator picks one pod and reports target pod CPU/memory metrics
 - `-target-mode=service`:
   - requires `-target-namespace` and `-target-service`
-  - orchestrator targets all service backing pods and reports their CPU/memory metrics
+  - workers target the service endpoint; Kubernetes load-balances across backing pods
+  - orchestrator still resolves backing pods to collect/report their CPU/memory metrics
 - `-target-mode=url`:
   - requires `-target-url` (absolute URL, e.g. `https://api.example.com`)
   - no pod metrics are collected
