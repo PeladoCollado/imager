@@ -24,6 +24,7 @@ func NewHandler(ctx context.Context) http.Handler {
 	mux.HandleFunc("/connect", connectHandler)
 	mux.HandleFunc("/heartbeat", heartbeatHandler)
 	mux.HandleFunc("/next", nextHandler(ctx))
+	mux.HandleFunc("/report", reportHandler)
 	return mux
 }
 
@@ -133,4 +134,40 @@ func parseWorkerId(r *http.Request) (*types.WorkerId, *HttpError) {
 		workerId.Workers = 1
 	}
 	return workerId, nil
+}
+
+func reportHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	report, httpError := parseJobReport(r)
+	if httpError != nil {
+		w.WriteHeader(httpError.code)
+		_, _ = fmt.Fprint(w, httpError.Error())
+		return
+	}
+	if err := manager.RecordJobReport(*report); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprint(w, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func parseJobReport(r *http.Request) (*types.JobReport, *HttpError) {
+	defer r.Body.Close()
+	decoder := json.NewDecoder(r.Body)
+	report := &types.JobReport{}
+	if err := decoder.Decode(report); err != nil {
+		logger.Logger.Error("Unable to parse report payload", err)
+		return nil, &HttpError{code: http.StatusBadRequest, err: err}
+	}
+	if report.JobID == "" {
+		return nil, &HttpError{code: http.StatusBadRequest, err: fmt.Errorf("jobId is required")}
+	}
+	if report.RoundID == "" {
+		return nil, &HttpError{code: http.StatusBadRequest, err: fmt.Errorf("roundId is required")}
+	}
+	return report, nil
 }

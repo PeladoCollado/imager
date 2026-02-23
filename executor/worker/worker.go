@@ -16,7 +16,13 @@ import (
 
 var client http.Client
 
-func RunJob(ctx context.Context, job types.Job, metricsCollector metrics.MetricsCollector) {
+func RunJob(ctx context.Context, job types.Job, metricsCollector metrics.MetricsCollector) types.JobReport {
+	report := types.JobReport{
+		JobID:           job.ID,
+		RoundID:         job.RoundID,
+		PlannedRequests: job.RequestedCount(),
+		LatencyMillis:   make([]int64, 0, job.RequestedCount()),
+	}
 	metricsCollector.RecordJobPickedUp(job.RequestedCount())
 
 	jobDuration := job.Duration()
@@ -25,7 +31,10 @@ func RunJob(ctx context.Context, job types.Job, metricsCollector metrics.Metrics
 	}
 	if len(job.TargetURLs) == 0 {
 		logger.Logger.Error("Job has no target URLs", job.ID)
-		return
+		report.FailureCount = report.PlannedRequests
+		report.TimeoutCount = report.PlannedRequests
+		report.CompletedRequests = report.PlannedRequests
+		return report
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, jobDuration)
@@ -34,23 +43,44 @@ func RunJob(ctx context.Context, job types.Job, metricsCollector metrics.Metrics
 	for idx, requestSpec := range job.Requests {
 		select {
 		case <-runCtx.Done():
-			return
+			return report
 		default:
 		}
 
 		target := job.TargetURLs[idx%len(job.TargetURLs)]
-		executeRequest(runCtx, target, requestSpec, metricsCollector)
+		result := executeRequest(runCtx, target, requestSpec, metricsCollector)
+		if !result.executed {
+			continue
+		}
+		report.CompletedRequests++
+		report.LatencyMillis = append(report.LatencyMillis, result.duration.Milliseconds())
+		if result.success {
+			report.SuccessCount++
+		} else {
+			report.FailureCount++
+		}
+		if result.timeout {
+			report.TimeoutCount++
+		}
 	}
+	return report
+}
+
+type requestResult struct {
+	executed bool
+	success  bool
+	timeout  bool
+	duration time.Duration
 }
 
 func executeRequest(ctx context.Context,
 	target string,
 	requestSpec types.RequestSpec,
-	metricsCollector metrics.MetricsCollector) {
+	metricsCollector metrics.MetricsCollector) requestResult {
 	requestURL, err := buildRequestURL(target, requestSpec.Path, requestSpec.QueryString)
 	if err != nil {
 		metricsCollector.PostFailure(metrics.ErrorEvent{ErrMsg: err.Error()})
-		return
+		return requestResult{executed: true}
 	}
 
 	method := requestSpec.Method
@@ -66,7 +96,7 @@ func executeRequest(ctx context.Context,
 	request, err := http.NewRequestWithContext(ctx, method, requestURL, body)
 	if err != nil {
 		metricsCollector.PostFailure(metrics.ErrorEvent{ErrMsg: err.Error()})
-		return
+		return requestResult{executed: true}
 	}
 	for key, values := range requestSpec.Headers {
 		request.Header[key] = append([]string(nil), values...)
@@ -81,7 +111,11 @@ func executeRequest(ctx context.Context,
 			ErrMsg:   err.Error(),
 			Duration: firstByteDuration,
 		})
-		return
+		return requestResult{
+			executed: true,
+			timeout:  errorQualifiesAsTimeout(err, firstByteDuration),
+			duration: firstByteDuration,
+		}
 	}
 	defer response.Body.Close()
 
@@ -92,7 +126,11 @@ func executeRequest(ctx context.Context,
 			ErrMsg:   errMsg,
 			Duration: firstByteDuration,
 		})
-		return
+		return requestResult{
+			executed: true,
+			timeout:  statusQualifiesAsTimeout(response.StatusCode),
+			duration: firstByteDuration,
+		}
 	}
 
 	bytesRead, readErr := io.Copy(io.Discard, response.Body)
@@ -102,15 +140,24 @@ func executeRequest(ctx context.Context,
 			ErrMsg:   readErr.Error(),
 			Duration: time.Since(start),
 		})
-		return
+		return requestResult{
+			executed: true,
+			duration: time.Since(start),
+		}
 	}
 
+	duration := time.Since(start)
 	metricsCollector.PostSuccess(metrics.SuccessEvent{
 		Status:        response.StatusCode,
 		ResponseSize:  bytesRead,
-		Duration:      time.Since(start),
+		Duration:      duration,
 		FirstByteTime: firstByteDuration,
 	})
+	return requestResult{
+		executed: true,
+		success:  true,
+		duration: duration,
+	}
 }
 
 func buildRequestURL(targetBaseURL string, path string, query string) (string, error) {
@@ -141,4 +188,15 @@ func readErrorBody(body io.Reader) string {
 		return fmt.Sprintf("Unable to read error message from response %v", err)
 	}
 	return string(bytesRead)
+}
+
+func statusQualifiesAsTimeout(statusCode int) bool {
+	return statusCode == http.StatusServiceUnavailable || statusCode == http.StatusGatewayTimeout
+}
+
+func errorQualifiesAsTimeout(_ error, duration time.Duration) bool {
+	if duration >= time.Minute {
+		return true
+	}
+	return false
 }

@@ -14,6 +14,7 @@ type RequestSpec struct {
 
 type Job struct {
 	ID             string        `json:"id"`
+	RoundID        string        `json:"roundId,omitempty"`
 	Requests       []RequestSpec `json:"requests"`
 	TargetURLs     []string      `json:"targetUrls"`
 	RatePerSec     int           `json:"ratePerSec"`
@@ -36,4 +37,16 @@ func (j Job) RequestedCount() int {
 type WorkerId struct {
 	Id      string `json:"id"`
 	Workers int    `json:"workers"`
+}
+
+type JobReport struct {
+	ExecutorID        string  `json:"executorId,omitempty"`
+	JobID             string  `json:"jobId"`
+	RoundID           string  `json:"roundId"`
+	PlannedRequests   int     `json:"plannedRequests"`
+	CompletedRequests int     `json:"completedRequests"`
+	SuccessCount      int     `json:"successCount"`
+	FailureCount      int     `json:"failureCount"`
+	TimeoutCount      int     `json:"timeoutCount"`
+	LatencyMillis     []int64 `json:"latencyMillis,omitempty"`
 }

@@ -25,6 +25,22 @@ func TestBuiltInLoadCalculatorRejectsUnsupportedType(t *testing.T) {
 	}
 }
 
+func TestBuiltInLoadCalculatorSupportsAdaptiveExponential(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.LoadCalculator = "adaptive-exponential"
+	cfg.MinRPS = 10
+	cfg.MaxRPS = 100
+	cfg.AdaptiveMaxLatencyMillis = 250
+
+	calc, err := NewBuiltInLoadCalculator(cfg)
+	if err != nil {
+		t.Fatalf("unexpected adaptive calculator error: %v", err)
+	}
+	if calc.Next() != 10 {
+		t.Fatalf("expected adaptive calculator to start at min rps")
+	}
+}
+
 func TestCustomRequestSourceFactoryCanHandleUnknownType(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.RequestSourceType = "database"

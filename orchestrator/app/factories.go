@@ -56,6 +56,8 @@ func NewBuiltInLoadCalculator(cfg Config) (manager.LoadCalculator, error) {
 		return manager.NewExponentialLoadCalculator(cfg.MinRPS, cfg.MaxRPS), nil
 	case "logarithmic":
 		return manager.NewLogarithmicLoadCalculator(cfg.MinRPS, cfg.MaxRPS), nil
+	case "adaptive-exponential":
+		return manager.NewAdaptiveExponentialLoadCalculator(cfg.MinRPS, cfg.MaxRPS, cfg.AdaptiveMaxLatencyMillis), nil
 	default:
 		return nil, fmt.Errorf("unsupported load-calculator %q", cfg.LoadCalculator)
 	}

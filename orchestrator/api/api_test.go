@@ -13,7 +13,9 @@ import (
 
 func TestConnectHeartbeatAndNext(t *testing.T) {
 	manager.ResetExecutors()
+	manager.ResetRoundReports()
 	t.Cleanup(manager.ResetExecutors)
+	t.Cleanup(manager.ResetRoundReports)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -61,6 +63,38 @@ func TestConnectHeartbeatAndNext(t *testing.T) {
 	}
 	if len(decoded) != 1 || decoded[0].ID != "job-1" {
 		t.Fatalf("unexpected next jobs payload: %+v", decoded)
+	}
+}
+
+func TestReportEndpointAcceptsJobReports(t *testing.T) {
+	manager.ResetRoundReports()
+	t.Cleanup(manager.ResetRoundReports)
+
+	handler := NewHandler(context.Background())
+	manager.RegisterRound("round-1", 10, 1, 2)
+	report := types.JobReport{
+		JobID:             "job-1",
+		RoundID:           "round-1",
+		PlannedRequests:   2,
+		CompletedRequests: 2,
+		SuccessCount:      2,
+		LatencyMillis:     []int64{10, 20},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/report", marshalBody(t, report))
+	resp := httptest.NewRecorder()
+
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d", http.StatusAccepted, resp.Code)
+	}
+
+	observations := manager.DrainReadyObservations(0)
+	if len(observations) != 1 {
+		t.Fatalf("expected one observation, got %d", len(observations))
+	}
+	if observations[0].RoundID != "round-1" {
+		t.Fatalf("unexpected round id %q", observations[0].RoundID)
 	}
 }
 

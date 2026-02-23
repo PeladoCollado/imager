@@ -71,6 +71,12 @@ func dispatchTick(ctx context.Context,
 	resolver TargetResolver,
 	metrics ScheduleMetrics,
 	jobDuration time.Duration) {
+	if feedbackCalculator, ok := calc.(FeedbackLoadCalculator); ok {
+		for _, observation := range DrainReadyObservations(2 * jobDuration) {
+			feedbackCalculator.Observe(observation)
+		}
+	}
+
 	executors := EligibleExecutors()
 	if metrics != nil {
 		metrics.SetRegisteredExecutors(len(executors))
@@ -98,6 +104,7 @@ func dispatchTick(ctx context.Context,
 		return
 	}
 
+	roundID := fmt.Sprintf("round-%d", time.Now().UnixNano())
 	totalRps := calc.Next()
 	if totalRps < 0 {
 		totalRps = 0
@@ -106,6 +113,8 @@ func dispatchTick(ctx context.Context,
 	baseRps := totalRps / totalWorkers
 	remainder := totalRps % totalWorkers
 	var globalWorkerIndex int
+	expectedReports := 0
+	plannedRequests := 0
 
 	for _, executor := range executors {
 		jobs := make([]types.Job, 0, executor.Workers)
@@ -133,12 +142,15 @@ func dispatchTick(ctx context.Context,
 
 			job := types.Job{
 				ID:             fmt.Sprintf("%s-%d-%d", executor.Id, time.Now().UnixNano(), i),
+				RoundID:        roundID,
 				Requests:       requests,
 				TargetURLs:     targetURLs,
 				RatePerSec:     workerRps,
 				DurationMillis: jobDuration.Milliseconds(),
 			}
 			jobs = append(jobs, job)
+			expectedReports++
+			plannedRequests += len(requests)
 			if metrics != nil {
 				metrics.RecordJobDispatched(len(requests))
 			}
@@ -148,4 +160,6 @@ func dispatchTick(ctx context.Context,
 			executor.WorkChan <- jobs
 		}
 	}
+
+	RegisterRound(roundID, totalRps, expectedReports, plannedRequests)
 }

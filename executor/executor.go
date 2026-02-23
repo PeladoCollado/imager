@@ -59,6 +59,7 @@ func main() {
 	connectURL := fmt.Sprintf("http://%s/connect", hostString)
 	heartbeatURL := fmt.Sprintf("http://%s/heartbeat", hostString)
 	nextURL := fmt.Sprintf("http://%s/next", hostString)
+	reportURL := fmt.Sprintf("http://%s/report", hostString)
 
 	if err := connect(connectURL, workerId); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -78,7 +79,7 @@ func main() {
 
 	workChan := make(chan types.Job)
 	for i := 0; i < workers; i++ {
-		go runJob(ctx, workChan, collector)
+		go runJob(ctx, workChan, collector, reportURL)
 	}
 
 	poll(ctx, nextURL, workChan, cancelChan)
@@ -165,11 +166,18 @@ func poll(ctx context.Context, nextURL string, work chan types.Job, cancelChan c
 	}
 }
 
-func runJob(ctx context.Context, work chan types.Job, metricsCollector metrics.MetricsCollector) {
+func runJob(ctx context.Context,
+	work chan types.Job,
+	metricsCollector metrics.MetricsCollector,
+	reportURL string) {
 	for {
 		select {
 		case job := <-work:
-			worker.RunJob(ctx, job, metricsCollector)
+			report := worker.RunJob(ctx, job, metricsCollector)
+			report.ExecutorID = workerId.Id
+			if err := reportJob(ctx, reportURL, report); err != nil {
+				logger.Logger.Warn("Unable to report job execution summary", err, report.JobID)
+			}
 		case <-ctx.Done():
 			return
 		}
@@ -216,6 +224,28 @@ func newWorkerRequest(method string, endpoint string, worker types.WorkerId) (*h
 	}
 	req.Header.Set("Content-Type", "application/json")
 	return req, nil
+}
+
+func reportJob(ctx context.Context, reportURL string, report types.JobReport) error {
+	payload, err := json.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("unable to encode report payload: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reportURL, bytes.NewBuffer(payload))
+	if err != nil {
+		return fmt.Errorf("unable to create report request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := orchestratorClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("unable to publish report: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("unexpected report response %d: %s", resp.StatusCode, readBody(resp.Body))
+	}
+	return nil
 }
 
 func readBody(body io.Reader) string {

@@ -74,7 +74,7 @@ func TestRunJobExecutesRequestsAgainstTargets(t *testing.T) {
 	}
 	collector := &fakeMetrics{}
 
-	RunJob(context.Background(), job, collector)
+	report := RunJob(context.Background(), job, collector)
 
 	lock.Lock()
 	totalCalls := server1Count + server2Count
@@ -94,6 +94,43 @@ func TestRunJobExecutesRequestsAgainstTargets(t *testing.T) {
 	}
 	if collector.requestsPlanned != 4 {
 		t.Fatalf("expected request plan count=4, got %d", collector.requestsPlanned)
+	}
+	if report.JobID != "job-1" {
+		t.Fatalf("unexpected job report id %q", report.JobID)
+	}
+	if report.CompletedRequests != 4 {
+		t.Fatalf("expected completed requests=4, got %d", report.CompletedRequests)
+	}
+	if report.SuccessCount != 4 || report.FailureCount != 0 {
+		t.Fatalf("unexpected success/failure counts in report: %+v", report)
+	}
+}
+
+func TestRunJobCounts503And504AsTimeouts(t *testing.T) {
+	statuses := []int{http.StatusServiceUnavailable, http.StatusGatewayTimeout}
+	index := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(statuses[index%len(statuses)])
+		index++
+	}))
+	defer server.Close()
+
+	job := types.Job{
+		ID: "job-timeout",
+		Requests: []types.RequestSpec{
+			{Method: "GET", Path: "/one"},
+			{Method: "GET", Path: "/two"},
+		},
+		TargetURLs:     []string{server.URL},
+		DurationMillis: time.Second.Milliseconds(),
+	}
+
+	report := RunJob(context.Background(), job, &fakeMetrics{})
+	if report.TimeoutCount != 2 {
+		t.Fatalf("expected timeout count=2, got %d", report.TimeoutCount)
+	}
+	if report.FailureCount != 2 {
+		t.Fatalf("expected failure count=2, got %d", report.FailureCount)
 	}
 }
 

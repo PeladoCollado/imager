@@ -26,10 +26,11 @@ type Config struct {
 	RandomSumMin      int
 	RandomSumMax      int
 
-	LoadCalculator string
-	MinRPS         int
-	MaxRPS         int
-	StepRPS        int
+	LoadCalculator           string
+	MinRPS                   int
+	MaxRPS                   int
+	StepRPS                  int
+	AdaptiveMaxLatencyMillis int64
 
 	ScheduleInterval    time.Duration
 	JobDuration         time.Duration
@@ -54,10 +55,11 @@ func DefaultConfig() Config {
 		RandomSumMin:      1,
 		RandomSumMax:      100,
 
-		LoadCalculator: "step",
-		MinRPS:         1,
-		MaxRPS:         100,
-		StepRPS:        1,
+		LoadCalculator:           "step",
+		MinRPS:                   1,
+		MaxRPS:                   100,
+		StepRPS:                  1,
+		AdaptiveMaxLatencyMillis: 0,
 
 		ScheduleInterval:    time.Second,
 		JobDuration:         time.Second,
@@ -84,10 +86,12 @@ func BindFlags(fs *flag.FlagSet, cfg *Config) {
 	fs.IntVar(&cfg.RandomSumMin, "random-sum-min", cfg.RandomSumMin, "Minimum random value used by random-sum request source")
 	fs.IntVar(&cfg.RandomSumMax, "random-sum-max", cfg.RandomSumMax, "Maximum random value used by random-sum request source")
 
-	fs.StringVar(&cfg.LoadCalculator, "load-calculator", cfg.LoadCalculator, "Load calculator: step, exponential, logarithmic")
+	fs.StringVar(&cfg.LoadCalculator, "load-calculator", cfg.LoadCalculator, "Load calculator: step, exponential, logarithmic, adaptive-exponential")
 	fs.IntVar(&cfg.MinRPS, "min-rps", cfg.MinRPS, "Minimum requests per second")
 	fs.IntVar(&cfg.MaxRPS, "max-rps", cfg.MaxRPS, "Maximum requests per second")
 	fs.IntVar(&cfg.StepRPS, "step-rps", cfg.StepRPS, "Step increase for step load calculator")
+	fs.Int64Var(&cfg.AdaptiveMaxLatencyMillis, "adaptive-max-latency-ms", cfg.AdaptiveMaxLatencyMillis,
+		"Adaptive calculator p99 latency limit in milliseconds (0 switches to timeout-threshold mode)")
 
 	fs.DurationVar(&cfg.ScheduleInterval, "schedule-interval", cfg.ScheduleInterval, "How often to dispatch jobs")
 	fs.DurationVar(&cfg.JobDuration, "job-duration", cfg.JobDuration, "Duration of each dispatched job")
@@ -119,6 +123,9 @@ func ValidateConfig(cfg Config) error {
 	}
 	if cfg.MaxRPS < cfg.MinRPS {
 		return fmt.Errorf("max-rps must be >= min-rps")
+	}
+	if cfg.AdaptiveMaxLatencyMillis < 0 {
+		return fmt.Errorf("adaptive-max-latency-ms must be >= 0")
 	}
 	if cfg.ScheduleInterval <= 0 {
 		return fmt.Errorf("schedule-interval must be > 0")

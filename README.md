@@ -182,6 +182,11 @@ If you switch fully to random-sum, remove `-request-source-file=...` and the `/c
 - `-load-calculator=step` with `-min-rps`, `-max-rps`, `-step-rps`
 - `-load-calculator=exponential` with `-min-rps`, `-max-rps`
 - `-load-calculator=logarithmic` with `-min-rps`, `-max-rps`
+- `-load-calculator=adaptive-exponential` with:
+  - `-min-rps`, `-max-rps`
+  - `-adaptive-max-latency-ms=<p99-ms-threshold>`
+  - if `-adaptive-max-latency-ms=0`, it switches to timeout mode and ramps until >=50% of requests time out (`503`, `504`, or no response headers for >=1 minute)
+  - after a threshold breach it runs recovery rounds at `<=1` rps, then performs binary search in 10 rps increments to find the highest sustainable rate
 
 Example step profile from 10 to 500 rps:
 ```yaml
@@ -189,6 +194,14 @@ Example step profile from 10 to 500 rps:
 - -min-rps=10
 - -max-rps=500
 - -step-rps=10
+```
+
+Example adaptive profile with a 250 ms p99 threshold:
+```yaml
+- -load-calculator=adaptive-exponential
+- -min-rps=10
+- -max-rps=500
+- -adaptive-max-latency-ms=250
 ```
 
 #### Target modes

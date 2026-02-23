@@ -60,6 +60,7 @@ func TestParseConfig(t *testing.T) {
 		"-min-rps=10",
 		"-max-rps=100",
 		"-step-rps=10",
+		"-adaptive-max-latency-ms=250",
 		"-schedule-interval=2s",
 		"-job-duration=1s",
 		"-metrics-poll-interval=4s",
@@ -83,10 +84,23 @@ func TestParseConfig(t *testing.T) {
 	if cfg.MinRPS != 10 || cfg.MaxRPS != 100 || cfg.StepRPS != 10 {
 		t.Fatalf("unexpected rps values: min=%d max=%d step=%d", cfg.MinRPS, cfg.MaxRPS, cfg.StepRPS)
 	}
+	if cfg.AdaptiveMaxLatencyMillis != 250 {
+		t.Fatalf("expected adaptive max latency 250ms, got %d", cfg.AdaptiveMaxLatencyMillis)
+	}
 	if cfg.ScheduleInterval != 2*time.Second {
 		t.Fatalf("expected 2s schedule interval, got %s", cfg.ScheduleInterval)
 	}
 	if cfg.MetricsPollInterval != 4*time.Second {
 		t.Fatalf("expected 4s metrics interval, got %s", cfg.MetricsPollInterval)
+	}
+}
+
+func TestValidateConfigRejectsNegativeAdaptiveLatency(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.TargetDeployment = "target"
+	cfg.AdaptiveMaxLatencyMillis = -1
+
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatalf("expected validation error for negative adaptive max latency")
 	}
 }
