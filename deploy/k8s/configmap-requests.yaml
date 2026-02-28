@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: imager-request-source
+data:
+  requests.json: |
+    {"method":"GET","path":"/"}
+    {"method":"GET","path":"/status"}

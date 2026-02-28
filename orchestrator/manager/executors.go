@@ -53,6 +53,13 @@ func GetExecutor(id string) *Executor {
 	return executorMap[id]
 }
 
+// CountExecutors returns the number of currently tracked executors.
+func CountExecutors() int {
+	lock.Lock()
+	defer lock.Unlock()
+	return len(executorMap)
+}
+
 // AddExecutor adds an Executor to the list of Executors to track.
 func AddExecutor(id string, workerCount int) {
 	lock.Lock()
@@ -68,7 +75,16 @@ func AddExecutor(id string, workerCount int) {
 
 // RecordHeartbeat records a heartbeat for an executor by its id.
 func RecordHeartbeat(id string) {
+	lock.Lock()
+	defer lock.Unlock()
 	if e, ok := executorMap[id]; ok {
 		e.HeartbeatTime = time.Now()
 	}
+}
+
+// ResetExecutors clears the in-memory executor registry.
+func ResetExecutors() {
+	lock.Lock()
+	defer lock.Unlock()
+	executorMap = make(map[string]*Executor)
 }

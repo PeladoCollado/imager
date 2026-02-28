@@ -1,0 +1,166 @@
+package app
+
+import (
+	"flag"
+	"fmt"
+	"net/url"
+	"time"
+
+	"github.com/PeladoCollado/imager/orchestrator/k8s"
+)
+
+type Config struct {
+	ListenPort int
+
+	TargetMode       string
+	TargetNamespace  string
+	TargetDeployment string
+	TargetService    string
+	TargetURL        string
+	TargetPortName   string
+	TargetScheme     string
+
+	RequestSourceType string
+	RequestSourceFile string
+	RandomSumPath     string
+	RandomSumMin      int
+	RandomSumMax      int
+
+	LoadCalculator           string
+	MinRPS                   int
+	MaxRPS                   int
+	StepRPS                  int
+	AdaptiveMaxLatencyMillis int64
+
+	ScheduleInterval    time.Duration
+	JobDuration         time.Duration
+	MetricsPollInterval time.Duration
+
+	InCluster  bool
+	Kubeconfig string
+}
+
+func DefaultConfig() Config {
+	return Config{
+		ListenPort: 8099,
+
+		TargetMode:      string(k8s.TargetModePod),
+		TargetNamespace: "default",
+		TargetPortName:  "http",
+		TargetScheme:    "http",
+
+		RequestSourceType: "file",
+		RequestSourceFile: "/config/requests.json",
+		RandomSumPath:     "/sum",
+		RandomSumMin:      1,
+		RandomSumMax:      100,
+
+		LoadCalculator:           "step",
+		MinRPS:                   1,
+		MaxRPS:                   100,
+		StepRPS:                  1,
+		AdaptiveMaxLatencyMillis: 0,
+
+		ScheduleInterval:    time.Second,
+		JobDuration:         time.Second,
+		MetricsPollInterval: 5 * time.Second,
+
+		InCluster: true,
+	}
+}
+
+func BindFlags(fs *flag.FlagSet, cfg *Config) {
+	fs.IntVar(&cfg.ListenPort, "listen-port", cfg.ListenPort, "Orchestrator API and metrics port")
+
+	fs.StringVar(&cfg.TargetMode, "target-mode", cfg.TargetMode, "Target mode: pod, service, or url")
+	fs.StringVar(&cfg.TargetNamespace, "target-namespace", cfg.TargetNamespace, "Kubernetes namespace for the target")
+	fs.StringVar(&cfg.TargetDeployment, "target-deployment", cfg.TargetDeployment, "Target deployment name (pod mode)")
+	fs.StringVar(&cfg.TargetService, "target-service", cfg.TargetService, "Target service name (service mode)")
+	fs.StringVar(&cfg.TargetURL, "target-url", cfg.TargetURL, "Absolute target URL (url mode), e.g. https://api.example.com:443")
+	fs.StringVar(&cfg.TargetPortName, "target-port-name", cfg.TargetPortName, "Target container port name")
+	fs.StringVar(&cfg.TargetScheme, "target-scheme", cfg.TargetScheme, "Target request URL scheme")
+
+	fs.StringVar(&cfg.RequestSourceType, "request-source-type", cfg.RequestSourceType, "Request source type: file or random-sum")
+	fs.StringVar(&cfg.RequestSourceFile, "request-source-file", cfg.RequestSourceFile, "Path to request source JSON file")
+	fs.StringVar(&cfg.RandomSumPath, "random-sum-path", cfg.RandomSumPath, "Path to call when using the random-sum request source")
+	fs.IntVar(&cfg.RandomSumMin, "random-sum-min", cfg.RandomSumMin, "Minimum random value used by random-sum request source")
+	fs.IntVar(&cfg.RandomSumMax, "random-sum-max", cfg.RandomSumMax, "Maximum random value used by random-sum request source")
+
+	fs.StringVar(&cfg.LoadCalculator, "load-calculator", cfg.LoadCalculator, "Load calculator: step, exponential, logarithmic, adaptive-exponential")
+	fs.IntVar(&cfg.MinRPS, "min-rps", cfg.MinRPS, "Minimum requests per second")
+	fs.IntVar(&cfg.MaxRPS, "max-rps", cfg.MaxRPS, "Maximum requests per second")
+	fs.IntVar(&cfg.StepRPS, "step-rps", cfg.StepRPS, "Step increase for step load calculator")
+	fs.Int64Var(&cfg.AdaptiveMaxLatencyMillis, "adaptive-max-latency-ms", cfg.AdaptiveMaxLatencyMillis,
+		"Adaptive calculator p99 latency limit in milliseconds (0 switches to timeout-threshold mode)")
+
+	fs.DurationVar(&cfg.ScheduleInterval, "schedule-interval", cfg.ScheduleInterval, "How often to dispatch jobs")
+	fs.DurationVar(&cfg.JobDuration, "job-duration", cfg.JobDuration, "Duration of each dispatched job")
+	fs.DurationVar(&cfg.MetricsPollInterval, "metrics-poll-interval", cfg.MetricsPollInterval, "How often to poll target pod metrics")
+
+	fs.BoolVar(&cfg.InCluster, "in-cluster", cfg.InCluster, "Use in-cluster Kubernetes config")
+	fs.StringVar(&cfg.Kubeconfig, "kubeconfig", cfg.Kubeconfig, "Kubeconfig path for out-of-cluster mode")
+}
+
+func ParseConfig(args []string) (Config, error) {
+	cfg := DefaultConfig()
+	fs := flag.NewFlagSet("orchestrator", flag.ContinueOnError)
+	BindFlags(fs, &cfg)
+	if err := fs.Parse(args); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func ValidateConfig(cfg Config) error {
+	if cfg.RequestSourceType == "" {
+		return fmt.Errorf("request-source-type is required")
+	}
+	if cfg.LoadCalculator == "" {
+		return fmt.Errorf("load-calculator is required")
+	}
+	if cfg.MinRPS < 0 || cfg.MaxRPS < 0 {
+		return fmt.Errorf("min-rps and max-rps must be >= 0")
+	}
+	if cfg.MaxRPS < cfg.MinRPS {
+		return fmt.Errorf("max-rps must be >= min-rps")
+	}
+	if cfg.AdaptiveMaxLatencyMillis < 0 {
+		return fmt.Errorf("adaptive-max-latency-ms must be >= 0")
+	}
+	if cfg.ScheduleInterval <= 0 {
+		return fmt.Errorf("schedule-interval must be > 0")
+	}
+	if cfg.JobDuration <= 0 {
+		return fmt.Errorf("job-duration must be > 0")
+	}
+	if cfg.MetricsPollInterval <= 0 {
+		return fmt.Errorf("metrics-poll-interval must be > 0")
+	}
+	switch cfg.TargetMode {
+	case string(k8s.TargetModePod):
+		if cfg.TargetNamespace == "" {
+			return fmt.Errorf("target-namespace is required in pod mode")
+		}
+		if cfg.TargetDeployment == "" {
+			return fmt.Errorf("target-deployment is required in pod mode")
+		}
+	case string(k8s.TargetModeService):
+		if cfg.TargetNamespace == "" {
+			return fmt.Errorf("target-namespace is required in service mode")
+		}
+		if cfg.TargetService == "" {
+			return fmt.Errorf("target-service is required in service mode")
+		}
+	case string(k8s.TargetModeURL):
+		if cfg.TargetURL == "" {
+			return fmt.Errorf("target-url is required in url mode")
+		}
+		parsed, err := url.Parse(cfg.TargetURL)
+		if err != nil || !parsed.IsAbs() {
+			return fmt.Errorf("target-url must be an absolute URL in url mode")
+		}
+	default:
+		return fmt.Errorf("unsupported target-mode %q", cfg.TargetMode)
+	}
+	return nil
+}
